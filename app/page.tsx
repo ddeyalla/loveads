@@ -12,6 +12,31 @@ interface UploadedImage {
   previewUrl: string
 }
 
+const URL_REGEX = /(?:(?:https?|ftp|file):\/\/|www\.|ftp\.)(?:\([-A-Z0-9+&@#\/%=~_|$?!:,.]*\)|[-A-Z0-9+&@#\/%=~_|$?!:,.])*(?:\([-A-Z0-9+&@#\/%=~_|$?!:,.]*\)|[A-Z0-9+&@#\/%=~_|$])/igm;
+
+const highlightUrls = (text: string): string => {
+  if (!text) return "";
+  // Escape HTML special characters in the text before inserting spans
+  const escapedText = text.replace(/[&<>'"\/]/g, (match) => {
+    const escapeMap: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+      '/': '&#x2F;'
+    };
+    return escapeMap[match] || match;
+  });
+  return escapedText.replace(URL_REGEX, (url) => {
+    // The URL itself should not be escaped again here as it's the content of the span
+    // However, the regex matches the original unescaped URL. We need to be careful.
+    // For simplicity, we'll use the matched URL directly assuming it doesn't contain problematic HTML itself.
+    // A more robust solution would parse text into segments and build HTML carefully.
+    return `<span style="color: #0281F2;">${url}</span>`;
+  });
+};
+
 export default function Home() {
   const router = useRouter()
   const [inputValue, setInputValue] = useState("")
@@ -19,73 +44,104 @@ export default function Home() {
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const contentEditableRef = useRef<HTMLDivElement>(null) // Changed from textareaRef
   const dropZoneRef = useRef<HTMLDivElement>(null)
   const scrollableContainerRef = useRef<HTMLDivElement>(null);
+  const [currentSelection, setCurrentSelection] = useState<{start: number, end: number} | null>(null);
 
-  // Auto-resize textarea and its container as content grows
+  // Auto-resize contentEditable div and its container as content grows
   useEffect(() => {
-    const textarea = textareaRef.current;
+    const editableDiv = contentEditableRef.current;
     const container = scrollableContainerRef.current;
-    if (!textarea || !container) return;
+    if (!editableDiv || !container) return;
 
     const MIN_HEIGHT_PX = 60;
-    const MAX_HEIGHT_PX = 312; // Reflecting user's last manual change
+    const MAX_HEIGHT_PX = 312;
 
     if (inputValue === "") {
       container.style.height = `${MIN_HEIGHT_PX}px`;
-      textarea.style.height = `${MIN_HEIGHT_PX}px`;
-      textarea.value = ""; // Explicitly clear textarea value if inputValue is empty
+      editableDiv.style.height = `${MIN_HEIGHT_PX}px`; // Ensure div also respects min height
     } else {
-      // Reset textarea height to accurately measure its scrollHeight for content
-      textarea.style.height = 'auto';
-      const contentScrollHeight = textarea.scrollHeight;
+      editableDiv.style.height = 'auto'; // Reset div height to measure its scrollHeight for content
+      const contentScrollHeight = editableDiv.scrollHeight;
 
-      // Determine new height for the container, capped at MAX_HEIGHT_PX and not less than MIN_HEIGHT_PX
       const newContainerHeight = Math.max(MIN_HEIGHT_PX, Math.min(contentScrollHeight, MAX_HEIGHT_PX));
       container.style.height = `${newContainerHeight}px`;
-
-      // Textarea should effectively fill the container or its own content height if it's pushing the limits
-      // To ensure correct scroll experience within the container, textarea's height should match its full content extent.
-      textarea.style.height = `${contentScrollHeight}px`; 
+      editableDiv.style.height = `${contentScrollHeight}px`;
     }
   }, [inputValue]);
-  
-  // Handle cursor position when selecting suggestions
+
+  // Effect to update contentEditable's innerHTML when inputValue changes & restore selection
   useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea || document.activeElement !== textarea) return;
-    
-    // Maintain cursor position when input changes
-    const position = textarea.selectionStart;
-    const newPosition = Math.min(position, inputValue.length);
-    
-    // Use requestAnimationFrame to ensure the DOM has updated
-    const rafId = requestAnimationFrame(() => {
-      // Check if the textarea is still mounted and focused
-      if (document.activeElement === textarea && textareaRef.current) {
-        textareaRef.current.setSelectionRange(newPosition, newPosition);
+    if (contentEditableRef.current) {
+      const selection = window.getSelection();
+      const currentTextInDiv = contentEditableRef.current.textContent || "";
+      const expectedHTML = highlightUrls(inputValue);
+
+      // Only update innerHTML if it's actually different or if plain text differs
+      // This helps prevent unnecessary updates if formatting is already correct.
+      if (currentTextInDiv !== inputValue || contentEditableRef.current.innerHTML !== expectedHTML) {
+        contentEditableRef.current.innerHTML = expectedHTML;
+
+        // Restore selection if the div is focused and a selection was previously saved
+        if (currentSelection && selection && document.activeElement === contentEditableRef.current) {
+          try {
+            const newRange = document.createRange();
+            let charCount = 0;
+            let startNode: Node | null = null;
+            let startIdxInNode = 0;
+            let endNode: Node | null = null;
+            let endIdxInNode = 0;
+
+            const treeWalker = document.createTreeWalker(contentEditableRef.current, NodeFilter.SHOW_TEXT, null);
+            let node;
+            while ((node = treeWalker.nextNode())) {
+              const nodeText = node.textContent || "";
+              const nodeTextLength = nodeText.length;
+
+              if (startNode === null && charCount + nodeTextLength >= currentSelection.start) {
+                startNode = node;
+                startIdxInNode = currentSelection.start - charCount;
+              }
+              if (endNode === null && charCount + nodeTextLength >= currentSelection.end) {
+                endNode = node;
+                endIdxInNode = currentSelection.end - charCount;
+                break; 
+              }
+              charCount += nodeTextLength;
+            }
+
+            if (startNode && endNode) {
+              startIdxInNode = Math.min(startIdxInNode, startNode.textContent?.length || 0);
+              endIdxInNode = Math.min(endIdxInNode, endNode.textContent?.length || 0);
+              if (startIdxInNode < 0) startIdxInNode = 0;
+              if (endIdxInNode < 0) endIdxInNode = 0;
+
+              newRange.setStart(startNode, startIdxInNode);
+              newRange.setEnd(endNode, endIdxInNode);
+              
+              selection.removeAllRanges();
+              selection.addRange(newRange);
+            } else if (contentEditableRef.current.childNodes.length > 0) {
+              newRange.selectNodeContents(contentEditableRef.current);
+              newRange.collapse(false); // To the end
+              selection.removeAllRanges();
+              selection.addRange(newRange);
+            }
+          } catch (error) {
+            console.error("Failed to restore selection:", error);
+            if (selection && contentEditableRef.current.childNodes.length > 0) {
+              const range = document.createRange();
+              range.selectNodeContents(contentEditableRef.current);
+              range.collapse(false);
+              selection.removeAllRanges();
+              selection.addRange(range);
+            }
+          }
+        }
       }
-    });
-
-    // Cleanup function to cancel the animation frame if component unmounts
-    return () => cancelAnimationFrame(rafId);
-  }, [inputValue]);
-
-  // Standardized URL regex pattern with improved matching
-  const URL_REGEX = /(https?:\/\/[^\s<>")]+|www\.[^\s<>"]+\.[^\s<>"]+[^\s<>\",.!?])(?=\s|$)/gi;
-  
-  // Function to detect if text contains a URL
-  const containsUrl = (text: string): boolean => {
-    return URL_REGEX.test(text);
-  }
-
-  // Function to extract URLs from text
-  const extractUrls = (text: string): string[] => {
-    // Reset regex state before using it
-    URL_REGEX.lastIndex = 0;
-    return text.match(URL_REGEX) || [];
-  }
+    }
+  }, [inputValue]); // currentSelection is not a direct dependency to avoid loops
 
   const handleImageUpload = () => {
     fileInputRef.current?.click()
@@ -198,126 +254,109 @@ export default function Home() {
   }
 
   const handleSuggestionClick = (suggestion: string) => {
-    setSelectedSuggestion(suggestion);
-    setInputValue(prev => prev + (prev ? ' ' : '') + suggestion);
-
-    // Focus the textarea after selecting a suggestion
-    setTimeout(() => {
-      const textarea = textareaRef.current;
-      if (textarea) {
-        textarea.focus();
-        const position = textarea.value.length;
-        textarea.setSelectionRange(position, position);
-      }
-    }, 0);
+    const newText = inputValue ? `${inputValue} ${suggestion}` : suggestion;
+    setInputValue(newText)
+    setSelectedSuggestion(suggestion)
+    // Focus the input area after suggestion click
+    contentEditableRef.current?.focus();
+    // Set selection to the end of the input
+    if (contentEditableRef.current) {
+        const textLength = newText.length;
+        setCurrentSelection({ start: textLength, end: textLength });
+    }
   }
 
-  // Handle keyboard shortcuts
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Submit on Ctrl+Enter or Cmd+Enter
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => { // Changed from HTMLTextAreaElement
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault(); // Prevent newline in contentEditable
       handleSendMessage()
     }
+    // Allow default for Enter if not Ctrl/Cmd for potential multi-line input in future
+    // For now, single line behavior on Enter is default unless modified.
   }
 
-  // Handle text input changes and auto-insert space after URLs
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newValue = e.target.value;
-    const cursorPosition = e.target.selectionStart || 0;
-    
-    // Reset regex state before using it
-    URL_REGEX.lastIndex = 0;
-    
-    // Check if we're at the end of a URL
-    const textBeforeCursor = newValue.substring(0, cursorPosition);
-    const textAfterCursor = newValue.substring(cursorPosition);
-    
-    // Find URLs in the text before cursor
-    let lastUrlEnd = -1;
-    let match;
-    
-    // Check for URLs before cursor
-    while ((match = URL_REGEX.exec(textBeforeCursor)) !== null) {
-      lastUrlEnd = match.index + match[0].length;
-    }
-    
-    // If cursor is right after a URL and there's no space/punctuation after
-    if (lastUrlEnd === cursorPosition && 
-        (textAfterCursor.length === 0 || !/^[\s,.:;!?]/.test(textAfterCursor))) {
-      const modifiedValue = textBeforeCursor + ' ' + textAfterCursor;
-      setInputValue(modifiedValue);
+  const handleContentEditableInput = (e: React.FormEvent<HTMLDivElement>) => {
+    const currentElement = e.currentTarget;
+    const newText = currentElement.textContent || "";
+
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0 && currentElement.contains(selection.anchorNode)) {
+      const range = selection.getRangeAt(0);
       
-      // Update cursor position after state update
-      requestAnimationFrame(() => {
-        if (textareaRef.current) {
-          const newCursorPos = cursorPosition + 1;
-          textareaRef.current.setSelectionRange(newCursorPos, newCursorPos);
-        }
-      });
-      return;
+      let selectionStart = 0;
+      let selectionEnd = 0;
+
+      // Calculate selectionStart
+      const preSelectionRangeStart = document.createRange();
+      preSelectionRangeStart.selectNodeContents(currentElement);
+      if(currentElement.contains(range.startContainer)){
+          preSelectionRangeStart.setEnd(range.startContainer, range.startOffset);
+          selectionStart = preSelectionRangeStart.toString().length;    
+      } else { // Fallback if range.startContainer is not a child of currentElement
+          selectionStart = newText.length;
+      }
+
+      // Calculate selectionEnd
+      const preSelectionRangeEnd = document.createRange();
+      preSelectionRangeEnd.selectNodeContents(currentElement);
+      if(currentElement.contains(range.endContainer)){
+          preSelectionRangeEnd.setEnd(range.endContainer, range.endOffset);
+          selectionEnd = preSelectionRangeEnd.toString().length;
+      } else { // Fallback if range.endContainer is not a child of currentElement
+          selectionEnd = newText.length;
+      }
+
+      setCurrentSelection({ start: selectionStart, end: selectionEnd });
+    } else {
+      const len = newText.length;
+      setCurrentSelection({ start: len, end: len });
     }
-    
-    // Default behavior if no URL was just completed
-    setInputValue(newValue);
+    setInputValue(newText);
   };
 
-  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+  const handleContentEditablePaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
     e.preventDefault();
     const pastedText = e.clipboardData.getData('text/plain');
-    const selectionStart = e.currentTarget.selectionStart || 0;
-    const selectionEnd = e.currentTarget.selectionEnd || 0;
-    
-    // Calculate where the pasted text will end *before* any URL processing adds spaces
-    const endOfPastedTextPos = selectionStart + pastedText.length;
+    if (!pastedText) return;
 
-    // Insert the pasted text
-    let newValue = inputValue.substring(0, selectionStart) + 
-                 pastedText + 
-                 inputValue.substring(selectionEnd);
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
     
-    // Process URLs in the pasted text
-    URL_REGEX.lastIndex = 0;
-    let match;
-    const urls: Array<{start: number, end: number}> = [];
+    const textNode = document.createTextNode(pastedText);
+    range.insertNode(textNode);
+
+    range.setStartAfter(textNode);
+    range.setEndAfter(textNode);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const currentElement = e.currentTarget;
+    const newFullText = currentElement.textContent || "";
     
-    // First, find all URLs in the new value
-    while ((match = URL_REGEX.exec(newValue)) !== null) {
-      urls.push({
-        start: match.index,
-        end: match.index + match[0].length
-      });
+    // Calculate new selection based on pasted text length
+    const prePasteRange = document.createRange();
+    prePasteRange.selectNodeContents(currentElement);
+    // The range's startContainer is where textNode was inserted, but its offset refers to *within* that node.
+    // So, we need to find the global offset up to where the paste happened.
+    // A simpler way: current selection is already at the end of pasted text. Recalculate its char offset.
+    let newCursorPos = 0;
+    const tempRangeForCursor = document.createRange();
+    tempRangeForCursor.selectNodeContents(currentElement);
+    if (currentElement.contains(range.endContainer)) {
+        tempRangeForCursor.setEnd(range.endContainer, range.endOffset);
+        newCursorPos = tempRangeForCursor.toString().length;
+    } else {
+        newCursorPos = newFullText.length;
     }
-    
-    // Store original cursor position before URL processing
-    const originalCursorPos = selectionStart + pastedText.length;
-    
-    // Process URLs from right to left to avoid offset issues
-    let offset = 0;
-    for (let i = urls.length - 1; i >= 0; i--) {
-      const url = urls[i];
-      const urlEnd = url.end + offset;
-      
-      // Check if we need to add a space after this URL
-      if (urlEnd >= newValue.length || !/^[\s,.:;!?]/.test(newValue[urlEnd])) {
-        newValue = newValue.substring(0, urlEnd) + ' ' + newValue.substring(urlEnd);
-        offset++;
-      }
-    }
-    
-    // Update the value
-    setInputValue(newValue);
-    
-    // Use multiple frames to ensure cursor position is set correctly
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (textareaRef.current) {
-          textareaRef.current.focus();
-          textareaRef.current.setSelectionRange(endOfPastedTextPos, endOfPastedTextPos);
-        }
-      });
-    });
+
+    setCurrentSelection({ start: newCursorPos, end: newCursorPos });
+    setInputValue(newFullText);
   };
 
+  console.log('[Component Render] inputValue:', inputValue); // DIAGNOSTIC
   return (
     <div className="min-h-screen w-full bg-gradient-to-br from-blue-300 via-teal-200 to-purple-300 flex flex-col">
       <div className="container mx-auto px-4 py-6 flex-1 flex flex-col">
@@ -380,87 +419,25 @@ export default function Home() {
                   className="relative"
                   style={{ minHeight: '60px', overflowY: 'auto' }} 
                 >
-                  {/* Formatted text overlay - only shown when input has value */}
-                  {inputValue && (
-                    <div 
-                      className="absolute inset-0 p-3 whitespace-pre-wrap break-words pointer-events-none"
-                      aria-hidden="true"
-                    >
-                      {inputValue.trim() !== "" ? (() => { // Ensure it doesn't render for whitespace-only inputValue either
-                        // Split text by URLs and non-URLs for proper rendering
-                        const parts: {text: string, isUrl: boolean}[] = [];
-                        let lastIndex = 0;
-                        let match;
-                        
-                        // Reset regex state
-                        URL_REGEX.lastIndex = 0;
-                        
-                        // Find all URLs and the text between them
-                        while ((match = URL_REGEX.exec(inputValue)) !== null) {
-                          // Add text before the URL
-                          if (match.index > lastIndex) {
-                            parts.push({
-                              text: inputValue.substring(lastIndex, match.index),
-                              isUrl: false
-                            });
-                          }
-                          
-                          // Add the URL
-                          parts.push({
-                            text: match[0],
-                            isUrl: true
-                          });
-                          
-                          lastIndex = match.index + match[0].length;
-                        }
-                        
-                        // Add remaining text after last URL
-                        if (lastIndex < inputValue.length) {
-                          parts.push({
-                            text: inputValue.substring(lastIndex),
-                            isUrl: false
-                          });
-                        }
-                        
-                        // Render all parts
-                        return parts.map((part, i) => (
-                          <span 
-                            key={i} 
-                            className={part.isUrl 
-                              ? "text-[#0281F2] bg-blue-50 px-1 rounded hover:bg-blue-100 transition-colors" 
-                              : "text-gray-900"}
-                          >
-                            {part.text}
-                          </span>
-                        ));
-                      })() : null} 
-                    </div>
-                  )}
-                  
-                  {/* Actual textarea for user input */}
-                  <textarea
-                    ref={textareaRef}
-                    value={inputValue}
-                    onChange={handleInputChange}
-                    onKeyDown={(e) => {
-                      // Allow default behavior for all keys except Enter when not combined with Ctrl/Cmd
-                      if (e.key === 'Enter' && !(e.ctrlKey || e.metaKey)) {
-                        e.preventDefault();
-                      }
-                      handleKeyDown(e);
-                    }}
-                    onPaste={handlePaste}
-                    placeholder="Drop your ideas and the product link you want to create ads for"
-                    className={`w-full resize-none text-base font-normal leading-normal bg-transparent outline-none p-3 absolute inset-0 ${inputValue ? 'text-transparent' : 'text-gray-900'}`}
-                    rows={1}
-                    style={{ 
+                  {/* Actual contentEditable div for user input */}
+                  <div
+                    ref={contentEditableRef}
+                    onInput={handleContentEditableInput}
+                    onKeyDown={handleKeyDown}
+                    onPaste={handleContentEditablePaste}
+                    contentEditable={true}
+                    suppressContentEditableWarning={true}
+                    className={`w-full resize-none text-base font-normal leading-normal bg-transparent outline-none p-3 absolute inset-0 text-gray-900`}
+                    style={{
                       whiteSpace: 'pre-wrap', 
                       overflowWrap: 'break-word',
                       lineHeight: '1.5',
-                      overflowY: 'hidden',
+                      overflowY: 'hidden', // Important for scrollHeight calculation of parent
                       font: 'inherit',
-                      caretColor: 'black' // Ensure caret is visible
+                      caretColor: 'black',
+                      minHeight: '24px', // Ensures div has some height even if empty for placeholder
                     }}
+                    data-placeholder="Drop your ideas and the product link you want to create ads for"
                     aria-label="Message input"
                     role="textbox"
                     aria-multiline="true"
@@ -468,6 +445,15 @@ export default function Home() {
                     autoCorrect="on"
                     autoCapitalize="sentences"
                   />
+                  {inputValue === "" && (
+                    <div 
+                      className="absolute inset-0 p-3 text-gray-500 pointer-events-none select-none"
+                      style={{ lineHeight: '1.5' }} // Match div's line height
+                      aria-hidden="true"
+                    >
+                      Drop your ideas and the product link you want to create ads for
+                    </div>
+                  )}
                 </div>
               </div>
 
