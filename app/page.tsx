@@ -12,29 +12,73 @@ interface UploadedImage {
   previewUrl: string
 }
 
-const URL_REGEX = /(?:(?:https?|ftp|file):\/\/|www\.|ftp\.)(?:\([-A-Z0-9+&@#\/%=~_|$?!:,.]*\)|[-A-Z0-9+&@#\/%=~_|$?!:,.])*(?:\([-A-Z0-9+&@#\/%=~_|$?!:,.]*\)|[A-Z0-9+&@#\/%=~_|$])/igm;
+// More permissive URL regex that handles complex URLs with various special characters
+const URL_REGEX = /(https?:\/\/|www\.|ftp:\/\/)[^\s\n\r\)\]\}"']+[^\s\n\r\)\]\}"'\.](?=[\s\n\r\)\]\}"']|$)/gim;
+
+// List of common TLDs to help avoid matching trailing punctuation
+const COMMON_TLDS = ['com', 'org', 'net', 'io', 'co', 'in', 'ai', 'dev', 'me', 'app'];
 
 const highlightUrls = (text: string): string => {
   if (!text) return "";
-  // Escape HTML special characters in the text before inserting spans
-  const escapedText = text.replace(/[&<>'"\/]/g, (match) => {
-    const escapeMap: Record<string, string> = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
-      '/': '&#x2F;'
-    };
-    return escapeMap[match] || match;
-  });
-  return escapedText.replace(URL_REGEX, (url) => {
-    // The URL itself should not be escaped again here as it's the content of the span
-    // However, the regex matches the original unescaped URL. We need to be careful.
-    // For simplicity, we'll use the matched URL directly assuming it doesn't contain problematic HTML itself.
-    // A more robust solution would parse text into segments and build HTML carefully.
-    return `<span style="color: #0281F2;">${url}</span>`;
-  });
+  
+  // First, escape all HTML special characters
+  const escapeHtml = (unsafe: string) => {
+    return unsafe
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  };
+  
+  // Split the text into parts, some of which are URLs and some aren't
+  const parts: { text: string; isUrl: boolean }[] = [];
+  let lastIndex = 0;
+  let match;
+  
+  while ((match = URL_REGEX.exec(text)) !== null) {
+    // Add text before the URL
+    if (match.index > lastIndex) {
+      parts.push({
+        text: escapeHtml(text.substring(lastIndex, match.index)),
+        isUrl: false
+      });
+    }
+    
+    // Process the URL
+    let url = match[0];
+    let cleanUrl = url;
+    
+    // Remove common trailing punctuation that might not be part of the URL
+    const trailingPunctuation = ['.', ',', '!', '?', ';', ':', ')', ']', '}'];
+    while (cleanUrl.length > 0 && trailingPunctuation.includes(cleanUrl[cleanUrl.length - 1])) {
+      cleanUrl = cleanUrl.slice(0, -1);
+    }
+    
+    // Ensure the URL has a protocol
+    if (!cleanUrl.startsWith('http')) {
+      cleanUrl = 'https://' + cleanUrl;
+    }
+    
+    // Add the URL part
+    parts.push({
+      text: `<span style="color: #0281F2;">${escapeHtml(url)}</span>`,
+      isUrl: true
+    });
+    
+    lastIndex = match.index + url.length;
+  }
+  
+  // Add any remaining text after the last URL
+  if (lastIndex < text.length) {
+    parts.push({
+      text: escapeHtml(text.substring(lastIndex)),
+      isUrl: false
+    });
+  }
+  
+  // Combine all parts
+  return parts.map(part => part.text).join('');
 };
 
 export default function Home() {
@@ -358,10 +402,17 @@ export default function Home() {
 
   console.log('[Component Render] inputValue:', inputValue); // DIAGNOSTIC
   return (
-    <div className="min-h-screen w-full bg-gradient-to-br from-blue-300 via-teal-200 to-purple-300 flex flex-col">
+    <div className="min-h-screen w-full flex flex-col bg-gradient-to-tr from-sky-300 via-purple-200 via-70% to-yellow-100 relative overflow-hidden">
+      {/* Decorative blobs */}
+      <div className="absolute w-96 h-96 bg-green-100 opacity-50 rounded-full blur-3xl left-10 top-24"></div>
+      <div className="absolute w-72 h-72 bg-pink-100 opacity-40 rounded-full blur-2xl right-24 top-10"></div>
+      <div className="absolute w-96 h-96 bg-yellow-100 opacity-40 rounded-full blur-2xl right-0 bottom-0"></div>
+      <div className="absolute w-80 h-80 bg-purple-200 opacity-30 rounded-full blur-2xl left-0 bottom-12"></div>
+      {/* Noise texture overlay */}
+      <div className="pointer-events-none absolute inset-0 z-10 bg-[url('https://www.transparenttextures.com/patterns/3px-tile.png')] opacity-100 mix-blend-overlay"></div>
       <div className="container mx-auto px-4 py-6 flex-1 flex flex-col">
         {/* Header - Sticky */}
-        <header className="flex justify-between items-center p-[10px_20px] sticky top-0 z-10 backdrop-blur-sm">
+        <header className="flex justify-between items-center sticky top-0 z-10">
           <div className="flex items-center gap-2">
             <Heart className="h-6 w-6 fill-black" />
             <span className="text-xl font-medium">Loveads</span>
