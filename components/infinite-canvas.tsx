@@ -125,10 +125,7 @@ export default function InfiniteCanvas({ images, setImages }: InfiniteCanvasProp
   // Handle wheel events for zooming
   const handleWheel = (e: WheelEvent) => {
     e.preventDefault()
-
-    // Determine zoom direction and amount
-    const delta = e.deltaY > 0 ? -0.02 : 0.02
-    const newZoom = Math.max(0.1, Math.min(5, zoom + delta))
+    console.log('Wheel event detected, deltaY:', e.deltaY)
 
     // Get mouse position relative to canvas
     const rect = canvasRef.current?.getBoundingClientRect()
@@ -137,10 +134,24 @@ export default function InfiniteCanvas({ images, setImages }: InfiniteCanvasProp
     const mouseX = e.clientX - rect.left
     const mouseY = e.clientY - rect.top
 
-    // Calculate new position to zoom toward mouse cursor
-    const newX = position.x - (mouseX / zoom) * delta
-    const newY = position.y - (mouseY / zoom) * delta
+    // Calculate world position before zoom
+    const worldX = (mouseX - position.x) / zoom
+    const worldY = (mouseY - position.y) / zoom
 
+    // Determine zoom direction and amount with variable sensitivity
+    // Use a scaling factor based on current zoom level for smoother zooming
+    const zoomFactor = 0.05 * (1 + zoom * 0.1) // Increases sensitivity at higher zoom levels
+    const direction = e.deltaY > 0 ? -1 : 1
+    
+    // Apply zoom change with smoothing
+    const newZoom = Math.max(0.1, Math.min(5, zoom * (1 + direction * zoomFactor)))
+    console.log(`Zoom changing from ${zoom.toFixed(2)} to ${newZoom.toFixed(2)}`)
+
+    // Calculate new position to zoom toward mouse cursor
+    const newX = mouseX - worldX * newZoom
+    const newY = mouseY - worldY * newZoom
+
+    // Update state
     setZoom(newZoom)
     setPosition({ x: newX, y: newY })
   }
@@ -415,11 +426,12 @@ export default function InfiniteCanvas({ images, setImages }: InfiniteCanvasProp
       const distance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY)
 
       const initialDistance = Number.parseFloat(canvasRef.current?.getAttribute("data-initial-pinch-distance") || "0")
+      const initialZoom = Number.parseFloat(canvasRef.current?.getAttribute("data-initial-zoom") || zoom.toString())
 
       if (initialDistance > 0) {
         // Calculate zoom change
-        const delta = (distance - initialDistance) / 200
-        const newZoom = Math.max(0.1, Math.min(5, zoom + delta))
+        const scale = distance / initialDistance
+        const newZoom = Math.max(0.1, Math.min(5, initialZoom * scale))
 
         // Get center of pinch
         const centerX = (touch1.clientX + touch2.clientX) / 2
@@ -440,8 +452,9 @@ export default function InfiniteCanvas({ images, setImages }: InfiniteCanvasProp
         setZoom(newZoom)
         setPosition({ x: newX, y: newY })
 
-        // Update initial distance for next calculation
+        // Update initial values for smooth continuous pinch
         canvasRef.current?.setAttribute("data-initial-pinch-distance", distance.toString())
+        canvasRef.current?.setAttribute("data-initial-zoom", newZoom.toString())
       }
     } else if (e.touches.length === 1 && isDragging) {
       // Single finger drag
@@ -530,31 +543,47 @@ export default function InfiniteCanvas({ images, setImages }: InfiniteCanvasProp
 
   // Handle file input change
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+    const files = e.target.files
+    if (!files || files.length === 0) return
 
-    const reader = new FileReader()
-    reader.onload = (event) => {
-      const img = new Image()
-      img.onload = () => {
-        const newImage: CanvasImage = {
-          id: `img-${Date.now()}`,
-          url: event.target?.result as string,
-          x: 100,
-          y: 100,
-          width: img.width,
-          height: img.height,
-          aspectRatio: img.width / img.height,
-          rotation: 0,
-          selected: true,
+    const fileArray = Array.from(files)
+    let loadedCount = 0
+    const newImages: CanvasImage[] = []
+    let runningX = 100
+
+    fileArray.forEach((file, idx) => {
+      const reader = new FileReader()
+      reader.onload = (event) => {
+        const img = new window.Image()
+        img.onload = () => {
+          const newImage: CanvasImage = {
+            id: `img-${Date.now()}-${idx}`,
+            url: event.target?.result as string,
+            x: runningX,
+            y: 100,
+            width: img.width,
+            height: img.height,
+            aspectRatio: img.width / img.height,
+            rotation: 0,
+            selected: false,
+          }
+          newImages.push(newImage)
+          runningX += img.width + 40
+
+          loadedCount++
+          if (loadedCount === fileArray.length) {
+            // Deselect all, add new images, select the last one
+            setImages((prev) => [
+              ...prev.map((img) => ({ ...img, selected: false })),
+              ...newImages.slice(0, -1),
+              { ...newImages[newImages.length - 1], selected: true },
+            ])
+          }
         }
-
-        // Deselect all other images and add the new one
-        setImages((prev) => [...prev.map((img) => ({ ...img, selected: false })), newImage])
+        img.src = event.target?.result as string
       }
-      img.src = event.target?.result as string
-    }
-    reader.readAsDataURL(file)
+      reader.readAsDataURL(file)
+    })
 
     // Reset the input
     if (fileInputRef.current) {
@@ -595,8 +624,35 @@ export default function InfiniteCanvas({ images, setImages }: InfiniteCanvasProp
     img.src = imageUrl
   }
 
+  // Keyboard shortcuts for canvas
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only trigger if canvas is focused/active
+      // (Optional: could check document.activeElement === containerRef.current)
+      // 1. Delete key: delete selected images
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        setImages((prev) => prev.filter((img) => !img.selected))
+      }
+      // 2. Cmd+A or Ctrl+A: select all images
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+        e.preventDefault()
+        setImages((prev) => prev.map((img) => ({ ...img, selected: true })))
+      }
+    }
+    const container = containerRef.current
+    if (container) {
+      container.tabIndex = 0 // Make focusable
+      container.addEventListener('keydown', handleKeyDown)
+    }
+    return () => {
+      if (container) {
+        container.removeEventListener('keydown', handleKeyDown)
+      }
+    }
+  }, [setImages])
+
   return (
-    <div ref={containerRef} className="w-full h-full overflow-hidden bg-white relative">
+    <div ref={containerRef} className="w-full h-full overflow-hidden bg-white relative" tabIndex={0}>
       {/* Canvas toolbar */}
       <div className="absolute top-4 right-4 z-10 bg-white rounded-lg shadow-md p-2 flex gap-2">
         <button
@@ -622,7 +678,7 @@ export default function InfiniteCanvas({ images, setImages }: InfiniteCanvasProp
       </div>
 
       {/* Hidden file input */}
-      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileChange} />
+      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileChange} multiple />
 
       {/* Canvas */}
       <div
