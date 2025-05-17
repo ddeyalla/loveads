@@ -1,771 +1,1680 @@
-"use client"
+"use client";
 
-import type React from "react"
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import Konva from "konva"; // Changed to default import
+import { 
+  Stage, 
+  Layer, 
+  Image as KonvaImage, 
+  Transformer, 
+  Rect, 
+  Group, 
+  Line, 
+  Text,
+  Circle,
+  useImage,
+} from "@/components/canvas-client-wrapper";
 
-import { useState, useRef, useEffect, useCallback, type MouseEvent, type TouchEvent, memo } from "react"
-import { Trash2, RotateCw, Download, Grid, Plus } from "lucide-react"
+// Types for canvas objects
+type ObjectType = 'image' | 'text' | 'rectangle' | 'circle';
 
-interface CanvasImage {
-  id: string
-  url: string
-  x: number
-  y: number
-  width: number
-  height: number
-  aspectRatio: number
-  rotation?: number
-  selected?: boolean
+// Base type for all canvas objects
+export interface CanvasObject {
+  id: string;
+  type: ObjectType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation?: number;
+  selected?: boolean;
+  zIndex: number; // For object layering
+  fill?: string; // Fill color
+  stroke?: string; // Stroke color
+  strokeWidth?: number; // Stroke width
+};
+
+// Image specific properties
+export interface CanvasImage extends CanvasObject {
+  type: 'image';
+  url: string;
+  aspectRatio: number;
+};
+
+// Text specific properties
+export interface CanvasText extends CanvasObject {
+  type: 'text';
+  text: string;
+  fontSize: number;
+  fontFamily: string;
+  fontStyle?: string;
+  align?: string;
+  fill: string;
+};
+
+// Rectangle specific properties
+export interface CanvasRectangle extends CanvasObject {
+  type: 'rectangle';
+  cornerRadius?: number;
+};
+
+// Circle specific properties
+export interface CanvasCircle extends CanvasObject {
+  type: 'circle';
+  // For circles, we'll use width/height for the bounding box
+  // and calculate radius = Math.min(width, height) / 2
+};
+
+// Union type for all canvas objects
+export type AnyCanvasObject = CanvasImage | CanvasText | CanvasRectangle | CanvasCircle;
+
+// Define properties for update actions, restricting to common CanvasObject properties
+export type UpdateObjectProps = Partial<Omit<CanvasObject, 'id' | 'type'>>;
+
+// Action types for undo/redo system
+export type ActionType = 
+  | { type: 'add', object: AnyCanvasObject }
+  | { type: 'remove', objectId: string }
+  | { type: 'update', objectId: string, prevProps: UpdateObjectProps, newProps: UpdateObjectProps }
+  | { type: 'reorder', objectIds: string[] };
+
+// Helper function to safely update canvas objects
+function safeUpdateObject<T extends AnyCanvasObject>(
+  obj: T,
+  newProps: UpdateObjectProps // Properties common to all objects, no 'id' or 'type'
+): T {
+  // The 'as T' is an assertion. We are telling TypeScript that spreading
+  // UpdateObjectProps onto a specific CanvasObject type (like CanvasImage)
+  // will result in a valid object of that same specific type.
+  // This is safe because UpdateObjectProps only contains common, non-discriminant properties.
+  return { ...obj, ...newProps, type: obj.type } as T;
 }
 
-interface InfiniteCanvasProps {
-  images: CanvasImage[]
-  setImages: React.Dispatch<React.SetStateAction<CanvasImage[]>>
+// Props for the standalone CanvasObjectRenderer
+interface CanvasObjectRendererProps {
+  object: AnyCanvasObject;
+  isSelected: boolean;
+  snapToGrid: (point: { x: number; y: number }) => { x: number; y: number };
+  onSelect: (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>, objectId: string) => void;
+  onChange: (id: string, props: Partial<Konva.NodeConfig>, saveHistory?: boolean) => void;
+  onDragStart: (id: string) => void;
 }
 
-// Memoized Image Component
-const CanvasImage = memo(({ 
-  image, 
-  onMouseDown, 
-  onResizeStart, 
-  onRotateStart,
-  zoom 
-}: { 
-  image: CanvasImage, 
-  onMouseDown: (e: React.MouseEvent<HTMLDivElement>, id: string) => void, 
-  onResizeStart: (e: React.MouseEvent<HTMLDivElement>, id: string, handle: string) => void, 
-  onRotateStart: (e: React.MouseEvent<HTMLDivElement>, id: string) => void,
-  zoom: number
+// Standalone CanvasObjectRenderer Component
+const CanvasObjectRenderer: React.FC<CanvasObjectRendererProps> = React.memo(({
+  object,
+  isSelected,
+  snapToGrid,
+  onSelect,
+  onChange,
+  onDragStart,
 }) => {
-  return (
-    <div
-      id={`image-${image.id}`}
-      className={`absolute ${image.selected ? 'outline outline-2 outline-blue-500' : ''}`}
-      style={{
-        left: `${image.x}px`,
-        top: `${image.y}px`,
-        width: `${image.width}px`,
-        height: `${image.height}px`,
-        transform: image.rotation ? `rotate(${image.rotation}deg)` : undefined,
-        transformOrigin: 'center center',
-      }}
-      onMouseDown={(e) => onMouseDown(e, image.id)}
-    >
-      <img
-        src={image.url || '/placeholder.svg'}
-        alt="Canvas item"
-        className="w-full h-full object-contain cursor-move select-none"
-        draggable={false}
-      />
-
-      {/* Resize handles (only show when selected) */}
-      {image.selected && (
-        <>
-          {/* Top-left */}
-          <div
-            className="absolute -top-1 -left-1 w-3 h-3 bg-white border-2 border-blue-500 rounded-full cursor-nwse-resize resize-handle z-10"
-            onMouseDown={(e) => onResizeStart(e, image.id, 'top-left')}
-          />
-
-          {/* Top-right */}
-          <div
-            className="absolute -top-1 -right-1 w-3 h-3 bg-white border-2 border-blue-500 rounded-full cursor-nesw-resize resize-handle z-10"
-            onMouseDown={(e) => onResizeStart(e, image.id, 'top-right')}
-          />
-
-          {/* Bottom-left */}
-          <div
-            className="absolute -bottom-1 -left-1 w-3 h-3 bg-white border-2 border-blue-500 rounded-full cursor-nesw-resize resize-handle z-10"
-            onMouseDown={(e) => onResizeStart(e, image.id, 'bottom-left')}
-          />
-
-          {/* Bottom-right */}
-          <div
-            className="absolute -bottom-1 -right-1 w-3 h-3 bg-white border-2 border-blue-500 rounded-full cursor-nwse-resize resize-handle z-10"
-            onMouseDown={(e) => onResizeStart(e, image.id, 'bottom-right')}
-          />
-
-          {/* Rotation handle */}
-          <div
-            className="absolute -top-8 left-1/2 transform -translate-x-1/2 w-6 h-6 bg-white border-2 border-blue-500 rounded-full flex items-center justify-center cursor-pointer rotate-handle z-10"
-            onMouseDown={(e) => onRotateStart(e, image.id)}
-          >
-            <RotateCw size={12} className="text-blue-500" />
-          </div>
-        </>
-      )}
-    </div>
-  )
-})
-
-CanvasImage.displayName = 'CanvasImage'
-
-export default function InfiniteCanvas({ images, setImages }: InfiniteCanvasProps) {
-  // Canvas state
-  const [position, setPosition] = useState({ x: 0, y: 0 })
-  const [zoom, setZoom] = useState(1)
-  const [isDragging, setIsDragging] = useState(false)
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
-  const [draggedImage, setDraggedImage] = useState<string | null>(null)
-  const [dragImageOffset, setDragImageOffset] = useState({ x: 0, y: 0 })
-  const [resizingImage, setResizingImage] = useState<string | null>(null)
-  const [resizeHandle, setResizeHandle] = useState<string | null>(null)
-  const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 })
-  const [rotatingImage, setRotatingImage] = useState<string | null>(null)
-  const [rotateStart, setRotateStart] = useState(0)
-  const [showGrid, setShowGrid] = useState(false)
-  const [showAddImageModal, setShowAddImageModal] = useState(false)
-  const [imageUrl, setImageUrl] = useState("")
-
-  // Refs
-  const canvasRef = useRef<HTMLDivElement>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const canvasContentRef = useRef<HTMLDivElement>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Handle wheel events for zooming
-  const handleWheel = (e: WheelEvent) => {
-    e.preventDefault()
-    console.log('Wheel event detected, deltaY:', e.deltaY)
-
-    // Get mouse position relative to canvas
-    const rect = canvasRef.current?.getBoundingClientRect()
-    if (!rect) return
-
-    const mouseX = e.clientX - rect.left
-    const mouseY = e.clientY - rect.top
-
-    // Calculate world position before zoom
-    const worldX = (mouseX - position.x) / zoom
-    const worldY = (mouseY - position.y) / zoom
-
-    // Determine zoom direction and amount with variable sensitivity
-    // Use a scaling factor based on current zoom level for smoother zooming
-    const zoomFactor = 0.05 * (1 + zoom * 0.1) // Increases sensitivity at higher zoom levels
-    const direction = e.deltaY > 0 ? -1 : 1
-    
-    // Apply zoom change with smoothing
-    const newZoom = Math.max(0.1, Math.min(5, zoom * (1 + direction * zoomFactor)))
-    console.log(`Zoom changing from ${zoom.toFixed(2)} to ${newZoom.toFixed(2)}`)
-
-    // Calculate new position to zoom toward mouse cursor
-    const newX = mouseX - worldX * newZoom
-    const newY = mouseY - worldY * newZoom
-
-    // Update state
-    setZoom(newZoom)
-    setPosition({ x: newX, y: newY })
-  }
-
-  // Add wheel event listener
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-
-    canvas.addEventListener("wheel", handleWheel, { passive: false })
-    return () => {
-      canvas.removeEventListener("wheel", handleWheel)
-    }
-  }, [zoom, position])
-
-  // Handle mouse down on canvas
-  const handleCanvasMouseDown = (e: MouseEvent<HTMLDivElement>) => {
-    // Only start dragging the canvas if not clicking on an image
-    if (
-      (e.target as HTMLElement).tagName !== "IMG" &&
-      !(e.target as HTMLElement).classList.contains("resize-handle") &&
-      !(e.target as HTMLElement).classList.contains("rotate-handle")
-    ) {
-      setIsDragging(true)
-      setDragStart({ x: e.clientX, y: e.clientY })
-
-      // Deselect all images when clicking on canvas
-      setImages((prev) => prev.map((img) => ({ ...img, selected: false })))
-    }
-  }
-
-  // Memoized event handlers
-  const handleImageMouseDown = useCallback((e: MouseEvent<HTMLDivElement>, imageId: string) => {
-    e.stopPropagation()
-
-    // Select the image and deselect others
-    setImages((prev) =>
-      prev.map((img) => ({
-        ...img,
-        selected: img.id === imageId,
-      })),
-    )
-
-    // Start dragging the image
-    setDraggedImage(imageId)
-
-    const image = images.find((img) => img.id === imageId)
-    if (!image) return
-
-    const rect = canvasRef.current?.getBoundingClientRect()
-    if (!rect) return
-
-    // Calculate the offset from the image's top-left corner
-    const offsetX = (e.clientX - rect.left) / zoom - image.x
-    const offsetY = (e.clientY - rect.top) / zoom - image.y
-
-    setDragImageOffset({ x: offsetX, y: offsetY })
-  }, [images, zoom])
-
-  const handleResizeStart = useCallback((e: MouseEvent<HTMLDivElement>, imageId: string, handle: string) => {
-    e.stopPropagation()
-
-    const image = images.find((img) => img.id === imageId)
-    if (!image) return
-
-    setResizingImage(imageId)
-    setResizeHandle(handle)
-    setResizeStart({
-      x: e.clientX,
-      y: e.clientY,
-      width: image.width,
-      height: image.height,
-    })
-  }, [images])
-
-  const handleRotateStart = useCallback((e: MouseEvent<HTMLDivElement>, imageId: string) => {
-    e.stopPropagation()
-
-    const image = images.find((img) => img.id === imageId)
-    if (!image) return
-
-    const imageElement = document.getElementById(`image-${imageId}`)
-    if (!imageElement) return
-
-    const rect = imageElement.getBoundingClientRect()
-    const centerX = rect.left + rect.width / 2
-    const centerY = rect.top + rect.height / 2
-
-    // Calculate initial angle
-    const initialAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX)
-
-    setRotatingImage(imageId)
-    setRotateStart(initialAngle)
-  }, [images])
-
-  // Handle mouse move
-  const handleMouseMove = (e: MouseEvent<HTMLDivElement>) => {
-    if (isDragging) {
-      // Dragging the canvas
-      const dx = (e.clientX - dragStart.x) / zoom
-      const dy = (e.clientY - dragStart.y) / zoom
-
-      setPosition({
-        x: position.x - dx,
-        y: position.y - dy,
-      })
-
-      setDragStart({ x: e.clientX, y: e.clientY })
-    } else if (draggedImage) {
-      // Dragging an image
-      const rect = canvasRef.current?.getBoundingClientRect()
-      if (!rect) return
-
-      // Calculate new position based on mouse position and offset
-      const newX = (e.clientX - rect.left) / zoom - dragImageOffset.x
-      const newY = (e.clientY - rect.top) / zoom - dragImageOffset.y
-
-      setImages(prev => 
-        prev.map(img => 
-          img.id === draggedImage ? { ...img, x: newX, y: newY } : img
-        )
-      )
-    } else if (resizingImage && resizeHandle) {
-      // Resizing an image
-      const image = images.find(img => img.id === resizingImage)
-      if (!image) return
-
-      const dx = (e.clientX - resizeStart.x) / zoom
-      const dy = (e.clientY - resizeStart.y) / zoom
-
-      let newWidth = resizeStart.width
-      let newHeight = resizeStart.height
-      let newX = image.x
-      let newY = image.y
-
-      // Calculate scale factor based on handle
-      let scaleX = 1
-      let scaleY = 1
-
-      switch (resizeHandle) {
-        case 'top-left':
-          scaleX = 1 - dx / resizeStart.width
-          scaleY = 1 - dy / resizeStart.height
-          break
-        case 'top-right':
-          scaleX = 1 + dx / resizeStart.width
-          scaleY = 1 - dy / resizeStart.height
-          break
-        case 'bottom-left':
-          scaleX = 1 - dx / resizeStart.width
-          scaleY = 1 + dy / resizeStart.height
-          break
-        case 'bottom-right':
-          scaleX = 1 + dx / resizeStart.width
-          scaleY = 1 + dy / resizeStart.height
-          break
-      }
-
-      // Maintain aspect ratio if shift key is pressed
-      if (e.shiftKey) {
-        const scale = Math.abs(scaleX) > Math.abs(scaleY) ? scaleX : scaleY
-        scaleX = scale
-        scaleY = scale
-      }
-
-      // Apply scaling
-      newWidth = Math.max(20, resizeStart.width * scaleX)
-      newHeight = Math.max(20, resizeStart.height * scaleY)
-
-      // Adjust position for top and left handles
-      if (resizeHandle.includes('left')) {
-        newX = image.x + (resizeStart.width - newWidth)
-      }
-      if (resizeHandle.includes('top')) {
-        newY = image.y + (resizeStart.height - newHeight)
-      }
-
-      setImages(prev =>
-        prev.map(img =>
-          img.id === resizingImage
-            ? {
-                ...img,
-                width: newWidth,
-                height: newHeight,
-                x: newX,
-                y: newY
-              }
-            : img
-        )
-      )
-    } else if (rotatingImage) {
-      // Rotating an image
-      const image = images.find(img => img.id === rotatingImage)
-      if (!image) return
-
-      const imageElement = document.getElementById(`image-${rotatingImage}`)
-      if (!imageElement) return
-
-      const rect = imageElement.getBoundingClientRect()
-      const centerX = rect.left + rect.width / 2
-      const centerY = rect.top + rect.height / 2
-
-      // Calculate angle between center and mouse position
-      const angle = Math.atan2(
-        e.clientY - centerY,
-        e.clientX - centerX
-      )
-
-      // Calculate rotation in degrees (add 270 to make 0° point up)
-      const rotation = ((angle * 180) / Math.PI + 270) % 360
-
-      setImages(prev => 
-        prev.map(img => 
-          img.id === rotatingImage ? { ...img, rotation } : img
-        )
-      )
-    }
-  }
-
-  // Handle mouse up
-  const handleMouseUp = () => {
-    setIsDragging(false)
-    setDraggedImage(null)
-    setResizingImage(null)
-    setResizeHandle(null)
-    setRotatingImage(null)
-  }
-
-  // Handle touch events for mobile
-  const handleTouchStart = useCallback((e: TouchEvent<HTMLDivElement>) => {
-    // Prevent default to avoid scrolling and other touch behaviors
-    e.preventDefault()
-    
-    if (e.touches.length === 2) {
-      // Two finger touch - for pinch zoom
-      const touch1 = e.touches[0]
-      const touch2 = e.touches[1]
-      const distance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY)
-
-      // Store initial distance for pinch calculation
-      canvasRef.current?.setAttribute("data-initial-pinch-distance", distance.toString())
-      
-      // Store initial zoom level
-      canvasRef.current?.setAttribute("data-initial-zoom", zoom.toString())
-    } else if (e.touches.length === 1) {
-      // Single finger touch - for dragging
-      const touch = e.touches[0]
-      const target = document.elementFromPoint(touch.clientX, touch.clientY)
-      
-      // Check if we're touching an image or a handle
-      if (target?.closest('.resize-handle, .rotate-handle')) {
-        // Let the mouse event handlers deal with resizing/rotating
-        return
-      }
-      
-      // Otherwise, start canvas dragging
-      setIsDragging(true)
-      setDragStart({
-        x: touch.clientX,
-        y: touch.clientY,
-      })
-    }
-  }, [zoom])
-
-  const handleTouchMove = (e: TouchEvent<HTMLDivElement>) => {
-    e.preventDefault()
-
-    if (e.touches.length === 2) {
-      // Pinch zoom
-      const touch1 = e.touches[0]
-      const touch2 = e.touches[1]
-      const distance = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY)
-
-      const initialDistance = Number.parseFloat(canvasRef.current?.getAttribute("data-initial-pinch-distance") || "0")
-      const initialZoom = Number.parseFloat(canvasRef.current?.getAttribute("data-initial-zoom") || zoom.toString())
-
-      if (initialDistance > 0) {
-        // Calculate zoom change
-        const scale = distance / initialDistance
-        const newZoom = Math.max(0.1, Math.min(5, initialZoom * scale))
-
-        // Get center of pinch
-        const centerX = (touch1.clientX + touch2.clientX) / 2
-        const centerY = (touch1.clientY + touch2.clientY) / 2
-
-        // Get position relative to canvas
-        const rect = canvasRef.current?.getBoundingClientRect()
-        if (!rect) return
-
-        const relativeX = centerX - rect.left
-        const relativeY = centerY - rect.top
-
-        // Calculate new position to zoom toward pinch center
-        const zoomDelta = newZoom - zoom
-        const newX = position.x - (relativeX / zoom) * zoomDelta
-        const newY = position.y - (relativeY / zoom) * zoomDelta
-
-        setZoom(newZoom)
-        setPosition({ x: newX, y: newY })
-
-        // Update initial values for smooth continuous pinch
-        canvasRef.current?.setAttribute("data-initial-pinch-distance", distance.toString())
-        canvasRef.current?.setAttribute("data-initial-zoom", newZoom.toString())
-      }
-    } else if (e.touches.length === 1 && isDragging) {
-      // Single finger drag
-      const dx = (e.touches[0].clientX - dragStart.x) / zoom
-      const dy = (e.touches[0].clientY - dragStart.y) / zoom
-
-      setPosition({
-        x: position.x - dx,
-        y: position.y - dy,
-      })
-
-      setDragStart({
-        x: e.touches[0].clientX,
-        y: e.touches[0].clientY,
-      })
-    }
-  }
-
-  const handleTouchEnd = () => {
-    setIsDragging(false)
-    canvasRef.current?.removeAttribute("data-initial-pinch-distance")
-  }
-
-  // Delete selected image
-  const deleteSelectedImage = () => {
-    const selectedImage = images.find((img) => img.selected)
-    if (selectedImage) {
-      setImages((prev) => prev.filter((img) => img.id !== selectedImage.id))
-    }
-  }
-
-  // Toggle grid
-  const toggleGrid = () => {
-    setShowGrid(!showGrid)
-  }
-
-  // Export canvas as image
-  const exportCanvas = () => {
-    const canvas = document.createElement("canvas")
-    const ctx = canvas.getContext("2d")
-    if (!ctx || !canvasContentRef.current) return
-
-    const canvasContent = canvasContentRef.current
-    const rect = canvasContent.getBoundingClientRect()
-
-    canvas.width = 1131
-    canvas.height = 800
-
-    // Fill with white background
-    ctx.fillStyle = "#FFFFFF"
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-
-    // Draw each image
-    images.forEach(async (image) => {
-      const img = new Image()
-      img.crossOrigin = "anonymous"
-      img.src = image.url
-
-      await new Promise((resolve) => {
-        img.onload = () => {
-          ctx.save()
-
-          // Position and rotate
-          ctx.translate(image.x, image.y)
-          if (image.rotation) {
-            ctx.translate(image.width / 2, image.height / 2)
-            ctx.rotate((image.rotation * Math.PI) / 180)
-            ctx.translate(-image.width / 2, -image.height / 2)
-          }
-
-          // Draw the image
-          ctx.drawImage(img, 0, 0, image.width, image.height)
-
-          ctx.restore()
-          resolve(null)
-        }
-      })
-    })
-
-    // Download the image
-    const link = document.createElement("a")
-    link.download = "canvas-export.png"
-    link.href = canvas.toDataURL("image/png")
-    link.click()
-  }
-
-  // Handle file input change
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files || files.length === 0) return
-
-    const fileArray = Array.from(files)
-    let loadedCount = 0
-    const newImages: CanvasImage[] = []
-    let runningX = 100
-
-    fileArray.forEach((file, idx) => {
-      const reader = new FileReader()
-      reader.onload = (event) => {
-        const img = new window.Image()
-        img.onload = () => {
-          const newImage: CanvasImage = {
-            id: `img-${Date.now()}-${idx}`,
-            url: event.target?.result as string,
-            x: runningX,
-            y: 100,
-            width: img.width,
-            height: img.height,
-            aspectRatio: img.width / img.height,
-            rotation: 0,
-            selected: false,
-          }
-          newImages.push(newImage)
-          runningX += img.width + 40
-
-          loadedCount++
-          if (loadedCount === fileArray.length) {
-            // Deselect all, add new images, select the last one
-            setImages((prev) => [
-              ...prev.map((img) => ({ ...img, selected: false })),
-              ...newImages.slice(0, -1),
-              { ...newImages[newImages.length - 1], selected: true },
-            ])
-          }
-        }
-        img.src = event.target?.result as string
-      }
-      reader.readAsDataURL(file)
-    })
-
-    // Reset the input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ""
-    }
-  }
-
-  // Add image from URL
-  const addImageFromUrl = () => {
-    if (!imageUrl) return
-
-    const img = new Image()
-    img.onload = () => {
-      const newImage: CanvasImage = {
-        id: `img-${Date.now()}`,
-        url: imageUrl,
-        x: 100,
-        y: 100,
-        width: img.width,
-        height: img.height,
-        aspectRatio: img.width / img.height,
-        rotation: 0,
-        selected: true,
-      }
-
-      // Deselect all other images and add the new one
-      setImages((prev) => [...prev.map((img) => ({ ...img, selected: false })), newImage])
-
-      // Close modal and reset URL
-      setShowAddImageModal(false)
-      setImageUrl("")
-    }
-
-    img.onerror = () => {
-      alert("Failed to load image. Please check the URL and try again.")
-    }
-
-    img.src = imageUrl
-  }
-
-  // Keyboard shortcuts for canvas
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Only trigger if canvas is focused/active
-      // (Optional: could check document.activeElement === containerRef.current)
-      // 1. Delete key: delete selected images
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        setImages((prev) => prev.filter((img) => !img.selected))
-      }
-      // 2. Cmd+A or Ctrl+A: select all images
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
-        e.preventDefault()
-        setImages((prev) => prev.map((img) => ({ ...img, selected: true })))
-      }
-    }
-    const container = containerRef.current
-    if (container) {
-      container.tabIndex = 0 // Make focusable
-      container.addEventListener('keydown', handleKeyDown)
-    }
-    return () => {
-      if (container) {
-        container.removeEventListener('keydown', handleKeyDown)
-      }
-    }
-  }, [setImages])
-
-  return (
-    <div ref={containerRef} className="w-full h-full overflow-hidden bg-white relative" tabIndex={0}>
-      {/* Canvas toolbar */}
-      <div className="absolute top-4 right-4 z-10 bg-white rounded-lg shadow-md p-2 flex gap-2">
-        <button
-          className="p-2 hover:bg-gray-100 rounded-md"
-          onClick={() => fileInputRef.current?.click()}
-          title="Add Image"
-        >
-          <Plus size={18} />
-        </button>
-        <button
-          className={`p-2 hover:bg-gray-100 rounded-md ${showGrid ? "bg-blue-100" : ""}`}
-          onClick={toggleGrid}
-          title="Toggle Grid"
-        >
-          <Grid size={18} />
-        </button>
-        <button className="p-2 hover:bg-gray-100 rounded-md" onClick={deleteSelectedImage} title="Delete Selected">
-          <Trash2 size={18} />
-        </button>
-        <button className="p-2 hover:bg-gray-100 rounded-md" onClick={exportCanvas} title="Export Canvas">
-          <Download size={18} />
-        </button>
-      </div>
-
-      {/* Hidden file input */}
-      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileChange} multiple />
-
-      {/* Canvas */}
-      <div
-        ref={canvasRef}
-        className="w-full h-full cursor-grab active:cursor-grabbing touch-none select-none"
-        style={{ touchAction: 'none' }}
-        onMouseDown={handleCanvasMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-      >
-        <div
-          className="relative"
-          style={{
-            transform: `scale(${zoom}) translate(${-position.x}px, ${-position.y}px)`,
-            transformOrigin: "0 0",
-            width: "100000px", // Very large size for "infinite" canvas
-            height: "100000px",
+  switch (object.type) {
+    case 'image':
+      return (
+        <URLImage
+          image={object as CanvasImage}
+          isSelected={isSelected}
+          snapToGrid={snapToGrid} 
+          onSelect={onSelect}
+          onChange={onChange} 
+          onDragStart={onDragStart}
+        />
+      );
+    case 'text':
+      return (
+        <Text
+          key={object.id}
+          x={(object as CanvasText).x}
+          y={(object as CanvasText).y}
+          width={(object as CanvasText).width}
+          height={(object as CanvasText).height}
+          text={(object as CanvasText).text}
+          fontSize={(object as CanvasText).fontSize}
+          fontFamily={(object as CanvasText).fontFamily}
+          fontStyle={(object as CanvasText).fontStyle}
+          align={(object as CanvasText).align}
+          fill={(object as CanvasText).fill}
+          rotation={(object as CanvasText).rotation || 0}
+          draggable
+          onClick={(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => onSelect(e, object.id)}
+          onTap={(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => onSelect(e, object.id)}
+          onDragStart={() => onDragStart(object.id)}
+          onDragEnd={(e: Konva.KonvaEventObject<DragEvent>) => {
+            const node = e.target;
+            onChange(object.id, {
+              x: node.x(),
+              y: node.y()
+            }, true);
           }}
-        >
-          {/* Canvas content */}
-          <div
-            ref={canvasContentRef}
-            id="canvas-content"
-            className="absolute bg-white rounded-[10px] border border-black border-opacity-5"
-            style={{
-              left: "1000px", // Centered in our "infinite" space
-              top: "1000px",
-              width: "1131px",
-              height: "800px",
-            }}
-          >
-            {/* Grid (optional) */}
-            {showGrid && (
-              <div className="absolute inset-0 pointer-events-none">
-                <div
-                  className="w-full h-full"
-                  style={{
-                    backgroundImage:
-                      "linear-gradient(to right, rgba(0,0,0,0.05) 1px, transparent 1px), linear-gradient(to bottom, rgba(0,0,0,0.05) 1px, transparent 1px)",
-                    backgroundSize: "20px 20px",
-                  }}
-                />
-              </div>
-            )}
+          onTransform={(e: Konva.KonvaEventObject<Event>) => {
+            const node = e.target;
+            onChange(object.id, {
+              x: node.x(),
+              y: node.y(),
+              width: node.width() * node.scaleX(),
+              height: node.height() * node.scaleY(),
+              rotation: node.rotation()
+            }, false);
+          }}
+          onTransformEnd={(e: Konva.KonvaEventObject<Event>) => {
+            const node = e.target;
+            node.scaleX(1);
+            node.scaleY(1);
+            onChange(object.id, {
+              x: node.x(),
+              y: node.y(),
+              width: node.width() * node.scaleX(),
+              height: node.height() * node.scaleY(),
+              rotation: node.rotation()
+            }, true);
+          }}
+        />
+      );
+    case 'rectangle':
+      return (
+        <Rect
+          key={object.id}
+          x={(object as CanvasRectangle).x}
+          y={(object as CanvasRectangle).y}
+          width={(object as CanvasRectangle).width}
+          height={(object as CanvasRectangle).height}
+          fill={(object as CanvasRectangle).fill}
+          stroke={(object as CanvasRectangle).stroke}
+          strokeWidth={(object as CanvasRectangle).strokeWidth}
+          cornerRadius={(object as CanvasRectangle).cornerRadius}
+          rotation={(object as CanvasRectangle).rotation || 0}
+          draggable
+          onClick={(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => onSelect(e, object.id)}
+          onTap={(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => onSelect(e, object.id)}
+          onDragStart={() => onDragStart(object.id)}
+          onDragEnd={(e: Konva.KonvaEventObject<DragEvent>) => {
+            const node = e.target;
+            onChange(object.id, {
+              x: node.x(),
+              y: node.y()
+            }, true);
+          }}
+          onTransform={(e: Konva.KonvaEventObject<Event>) => {
+            const node = e.target;
+            onChange(object.id, {
+              x: node.x(),
+              y: node.y(),
+              width: node.width() * node.scaleX(),
+              height: node.height() * node.scaleY(),
+              rotation: node.rotation()
+            }, false);
+          }}
+          onTransformEnd={(e: Konva.KonvaEventObject<Event>) => {
+            const node = e.target;
+            node.scaleX(1);
+            node.scaleY(1);
+            onChange(object.id, {
+              x: node.x(),
+              y: node.y(),
+              width: node.width() * node.scaleX(),
+              height: node.height() * node.scaleY(),
+              rotation: node.rotation()
+            }, true);
+          }}
+        />
+      );
+    case 'circle':
+      return (
+        <Circle
+          key={object.id}
+          x={(object as CanvasCircle).x + (object as CanvasCircle).width / 2}
+          y={(object as CanvasCircle).y + (object as CanvasCircle).height / 2}
+          radius={Math.min((object as CanvasCircle).width, (object as CanvasCircle).height) / 2}
+          fill={(object as CanvasCircle).fill}
+          stroke={(object as CanvasCircle).stroke}
+          strokeWidth={(object as CanvasCircle).strokeWidth}
+          rotation={(object as CanvasCircle).rotation || 0}
+          draggable
+          onClick={(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => onSelect(e, object.id)}
+          onTap={(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => onSelect(e, object.id)}
+          onDragStart={() => onDragStart(object.id)}
+          onDragEnd={(e: Konva.KonvaEventObject<DragEvent>) => {
+            const node = e.target as Konva.Circle; // Cast to Konva.Circle
+            const radius = node.radius();
+            onChange(object.id, {
+              x: node.x() - radius,
+              y: node.y() - radius
+            }, true);
+          }}
+          onTransform={(e: Konva.KonvaEventObject<Event>) => {
+            const node = e.target as Konva.Circle; // Cast to Konva.Circle
+            const radius = node.radius() * Math.max(node.scaleX(), node.scaleY());
+            onChange(object.id, {
+              x: node.x() - radius,
+              y: node.y() - radius,
+              width: radius * 2,
+              height: radius * 2,
+              rotation: node.rotation()
+            }, false);
+          }}
+          onTransformEnd={(e: Konva.KonvaEventObject<Event>) => {
+            const node = e.target as Konva.Circle; // Cast to Konva.Circle
+            const radius = node.radius() * Math.max(node.scaleX(), node.scaleY());
+            node.scaleX(1);
+            node.scaleY(1);
+            onChange(object.id, {
+              x: node.x() - radius,
+              y: node.y() - radius,
+              width: radius * 2,
+              height: radius * 2,
+              rotation: node.rotation()
+            }, true);
+          }}
+        />
+      );
+    default:
+      return null;
+  }
+});
+CanvasObjectRenderer.displayName = 'CanvasObjectRenderer';
 
-            {/* Images */}
-            {images.map((image) => (
-              <CanvasImage
-                key={image.id}
-                image={image}
-                onMouseDown={handleImageMouseDown}
-                onResizeStart={handleResizeStart}
-                onRotateStart={handleRotateStart}
-                zoom={zoom}
-              />
-            ))}
-          </div>
-        </div>
+// Define the props for the InfiniteCanvas component
+export interface InfiniteCanvasProps {
+  canvasObjects: AnyCanvasObject[];
+  setCanvasObjects: React.Dispatch<React.SetStateAction<AnyCanvasObject[]>>;
+  onAddImage?: (image: CanvasImage) => void;
+};
+
+// Constants
+const ZOOM_SPEED = 0.05;
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 5;
+const GRID_SIZE = 50;
+const GRID_COLOR = "#f0f0f0";
+const BACKGROUND_COLOR = "#ffffff";
+const SNAP_THRESHOLD = 10; // Grid snapping threshold in pixels
+const CULLING_BUFFER = 200; // Buffer size for viewport culling
+
+// Keyboard shortcuts mapping
+const KEYBOARD_SHORTCUTS = {
+  DELETE: ['Delete', 'Backspace'],
+  COPY: ['c'],
+  PASTE: ['v'],
+  CUT: ['x'],
+  UNDO: ['z'],
+  REDO: ['y', 'Z'], // Z with shift
+  SELECT_ALL: ['a'],
+  DESELECT: ['Escape'],
+  MOVE_UP: ['ArrowUp'],
+  MOVE_DOWN: ['ArrowDown'],
+  MOVE_LEFT: ['ArrowLeft'],
+  MOVE_RIGHT: ['ArrowRight'],
+  LAYER_FORWARD: [']'],
+  LAYER_BACKWARD: ['['],
+  LAYER_FRONT: ['}'],
+  LAYER_BACK: ['{'],
+  ZOOM_IN: ['+', '='],
+  ZOOM_OUT: ['-', '_'],
+  ZOOM_RESET: ['0'],
+  TOGGLE_GRID: ['g'],
+  SNAP_TOGGLE: ['s']
+};
+
+// Custom Image component with transformation support
+interface URLImageProps {
+  image: CanvasImage;
+  isSelected: boolean;
+  snapToGrid: (point: { x: number; y: number; }) => { x: number; y: number; }; 
+  onSelect: (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>, objectId: string) => void; // Used Konva.KonvaEventObject
+  onChange?: (id: string, props: Partial<Konva.NodeConfig>, saveHistory?: boolean) => void; // Used Konva.NodeConfig
+  onDragStart?: (id: string) => void;
+}
+
+const URLImage: React.FC<URLImageProps> = ({ image, isSelected, snapToGrid, onSelect, onChange, onDragStart }) => {
+  const imageRef = useRef<any>(null);
+  const transformerRef = useRef<any>(null);
+  const [img, status] = useImage(image.url, "anonymous");
+  const [isDragging, setIsDragging] = useState(false);
+
+  // Handle snap to grid logic internally for URLImage, using the passed snapToGrid prop
+  const doSnap = useCallback((pos: {x: number, y: number}) => { 
+    if (!snapToGrid) return pos; // snapToGrid here is the prop passed to URLImage
+    
+    // Snap to nearest grid point
+    return {
+      x: Math.round(pos.x / GRID_SIZE) * GRID_SIZE,
+      y: Math.round(pos.y / GRID_SIZE) * GRID_SIZE
+    };
+  }, [snapToGrid]);
+
+  // Sync transformer with image when selected
+  useEffect(() => {
+    if (isSelected && transformerRef.current && imageRef.current) {
+      // Attach transformer to the image
+      transformerRef.current.nodes([imageRef.current]);
+      transformerRef.current.getLayer().batchDraw();
+    }
+  }, [isSelected]);
+
+  // Handle drag start
+  const handleDragStart = useCallback(() => {
+    setIsDragging(true);
+    onDragStart?.(image.id);
+  }, [onDragStart, image.id]);
+
+  // Handle drag end with snap to grid
+  const handleDragEnd = useCallback((e: any) => {
+    setIsDragging(false);
+    
+    // Get current position
+    const pos = {
+      x: e.target.x(),
+      y: e.target.y(),
+    };
+    
+    // Apply snap if enabled
+    const snappedPos = doSnap(pos);
+    
+    // Update position in state
+    onChange?.(image.id, {
+      x: snappedPos.x,
+      y: snappedPos.y,
+    }, true); // true to save this action in history
+  }, [imageRef, doSnap, onChange, image.id]);
+
+  // Handle transform end
+  const handleTransformEnd = useCallback(() => {
+    const node = imageRef.current;
+    if (!node) return;
+
+    const pos = { x: node.x(), y: node.y() };
+    const snappedPos = doSnap(pos); // Use renamed doSnap
+    
+    // Update position in state
+    onChange?.(image.id, {
+      x: snappedPos.x,
+      y: snappedPos.y,
+    }, true); // true to save this action in history
+
+    const scaleX = node.scaleX();
+    const scaleY = node.scaleY();
+    
+    // Calculate new dimensions and position
+    const newAttrs: Partial<Konva.NodeConfig> = { // Used Konva.NodeConfig
+      x: node.x(),
+      y: node.y(),
+      width: Math.max(5, node.width() * scaleX), // prevent zero or negative width/height
+      height: Math.max(5, node.height() * scaleY),
+      rotation: node.rotation(),
+    };
+
+    // Apply snap to x, y
+    const snappedPos2 = doSnap({ x: newAttrs.x!, y: newAttrs.y! }); // Use renamed doSnap
+    newAttrs.x = snappedPos2.x;
+    newAttrs.y = snappedPos2.y;
+
+    // Apply snap to width, height if necessary (e.g., maintain aspect ratio or snap dimensions)
+    // For simplicity, we are not snapping width/height here but could be added.
+    
+    // Update state
+    onChange?.(image.id, newAttrs, true); // true to save action in history
+    
+    // Reset scale to avoid accumulation
+    node.scaleX(1);
+    node.scaleY(1);
+  }, [onChange, doSnap, image.id]); // Depend on renamed doSnap
+
+  // Calculate pointer events based on loading status
+  const pointerEvents = status === "loaded" ? "auto" : "none";
+  
+  return (
+    <>
+      <KonvaImage
+        ref={imageRef}
+        image={img}
+        x={image.x}
+        y={image.y}
+        width={image.width}
+        height={image.height}
+        rotation={image.rotation || 0}
+        draggable
+        onClick={(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => onSelect(e, image.id)}
+        onTap={(e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => onSelect(e, image.id)}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+        onTransformStart={handleDragStart}
+        onTransformEnd={handleTransformEnd}
+        opacity={isDragging ? 0.7 : 1} // Visual feedback for dragging
+        shadowColor="rgba(0,0,0,0.3)"
+        shadowBlur={isSelected ? 6 : 0}
+        shadowOffsetX={isSelected ? 3 : 0}
+        shadowOffsetY={isSelected ? 3 : 0}
+        strokeWidth={isSelected ? 2 : 0} // Outline
+        stroke="#0096FF" // Selection color
+        perfectDrawEnabled={true}
+        listening={pointerEvents === "auto"}
+      />
+      {isSelected && (
+        <Transformer
+          ref={transformerRef}
+          rotateEnabled={true}
+          enabledAnchors={[
+            "top-left",
+            "top-center",
+            "top-right",
+            "middle-left",
+            "middle-right",
+            "bottom-left",
+            "bottom-center",
+            "bottom-right",
+          ]}
+          borderStroke="#0096FF"
+          borderStrokeWidth={2}
+          anchorStroke="#0096FF"
+          anchorFill="#FFFFFF"
+          anchorSize={8}
+          rotateAnchorOffset={30}
+          boundBoxFunc={(oldBox: any, newBox: any) => {
+            // Limit minimum size
+            if (newBox.width < 5 || newBox.height < 5) {
+              return oldBox;
+            }
+            return newBox;
+          }}
+        />
+      )}
+    </>
+  );
+};
+
+// Main Infinite Canvas component
+const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanvasObjects, onAddImage }) => {
+  // Canvas state
+  const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
+  const [scale, setScale] = useState(1);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [showGrid, setShowGrid] = useState(true);
+  const [snapToGrid, setSnapToGrid] = useState(false);
+  const [clipboard, setClipboard] = useState<AnyCanvasObject[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [history, setHistory] = useState<ActionType[]>([]); 
+  const [touchStartDistance, setTouchStartDistance] = useState<number | null>(null);
+  const [touchStartScale, setTouchStartScale] = useState<number | null>(null);
+  const [touchStartPos, setTouchStartPos] = useState<{x: number, y: number} | null>(null);
+  const [isTouching, setIsTouching] = useState(false);
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+  const [selectionRect, setSelectionRect] = useState<{x: number, y: number, width: number, height: number} | null>(null);
+  const [selectionStart, setSelectionStart] = useState<{x: number, y: number} | null>(null);
+  const [visibleBounds, setVisibleBounds] = useState<{minX: number, minY: number, maxX: number, maxY: number}>({ minX: 0, minY: 0, maxX: 0, maxY: 0 });
+  
+  // Refs
+  const stageRef = useRef<any>(null);
+  const isDrawing = useRef(false);
+  const lastPointerPosition = useRef({ x: 0, y: 0 });
+  const isPanning = useRef(false);
+  const isShiftPressed = useRef(false);
+  const isCtrlPressed = useRef(false);
+  const isTransforming = useRef(false);
+  const layerRef = useRef<any>(null);
+  const requestAnimationFrameId = useRef<number | null>(null);
+  const imageRefs = useRef<Map<string, any>>(new Map());
+  
+  // Derived state - get selected objects
+  const selectedObjects = useMemo(() => {
+    return canvasObjects.filter(obj => selectedIds.includes(obj.id));
+  }, [canvasObjects, selectedIds]);
+  
+  // Add an action to history and execute it
+  const executeAction = useCallback((action: ActionType) => {
+    // Truncate future history if we're not at the end
+    const newHistory = history.slice(0, historyIndex + 1);
+    newHistory.push(action);
+    
+    // Execute the action
+    switch (action.type) {
+      case 'add':
+        setCanvasObjects(prev => [...prev, action.object]);
+        break;
+      case 'remove':
+        setCanvasObjects(prev => prev.filter(obj => obj.id !== action.objectId));
+        setSelectedIds(prev => prev.filter(id => id !== action.objectId));
+        break;
+      case 'update':
+        setCanvasObjects(prev => prev.map(obj => 
+          obj.id === action.objectId ? safeUpdateObject(obj, action.newProps) : obj
+        ));
+        break;
+      case 'reorder':
+        setCanvasObjects(prev => {
+          // Create a map of id => index
+          const orderMap = new Map(action.objectIds.map((id, index) => [id, index]));
+          
+          // Sort objects based on new order
+          return [...prev].sort((a, b) => {
+            const aOrder = orderMap.get(a.id) ?? Infinity;
+            const bOrder = orderMap.get(b.id) ?? Infinity;
+            return aOrder - bOrder;
+          });
+        });
+        break;
+    }
+    
+    // Update history state
+    setHistory(newHistory);
+    setHistoryIndex(newHistory.length - 1);
+  }, [history, historyIndex, setCanvasObjects]);
+  
+  // Undo function
+  const undo = useCallback(() => {
+    if (historyIndex >= 0) {
+      const actionToUndo = history[historyIndex];
+      
+      // Reverse the action
+      switch (actionToUndo.type) {
+        case 'add':
+          setCanvasObjects(prev => prev.filter(obj => obj.id !== actionToUndo.object.id));
+          setSelectedIds(prev => prev.filter(id => id !== actionToUndo.object.id));
+          break;
+        case 'remove':
+          // Reconstruct the object from history
+          let objectToRestoreFromHistory: AnyCanvasObject | undefined = undefined;
+          // Consider actions up to the point *before* the current undo operation effectively reverts the 'remove'
+          // So, we look at history up to the 'remove' action itself (historyIndex points to the action being undone)
+          const historyForRestoration = history.slice(0, historyIndex + 1); 
+
+          const addActionInstance = historyForRestoration.find(
+            (act): act is Extract<ActionType, { type: 'add' }> => 
+              act.type === 'add' && act.object.id === actionToUndo.objectId
+          );
+
+          if (addActionInstance) {
+            const initialObject = addActionInstance.object;
+
+            if (initialObject) { // Ensure initialObject exists before reducing
+              // Apply subsequent updates to reconstruct the object to its state before removal
+              const relevantUpdateActions = history
+                .slice(0, historyIndex) // Actions before the current 'remove' action's original position
+                .filter(a => 
+                  a.type === 'update' && 
+                  a.objectId === actionToUndo.objectId && 
+                  history.findIndex(hAct => hAct === a) > historyForRestoration.indexOf(addActionInstance) // Only updates after the add
+                ) as Extract<ActionType, {type: 'update'}>[];
+
+              const reconstructedObject = relevantUpdateActions.reduce(
+                // acc type is inferred from initialObject (e.g., CanvasImage)
+                // safeUpdateObject returns the same specific type T
+                (acc, historicalUpdateAction) => {
+                  return safeUpdateObject(acc, historicalUpdateAction.newProps);
+                },
+                initialObject // initial value is specifically typed (e.g. CanvasImage)
+              );
+              setCanvasObjects(prev => [...prev, reconstructedObject]);
+            }
+          } else {
+            // This case should ideally not be reached if history is consistent
+          }
+        case 'update':
+          // Explicitly cast actionToUndo to ensure prevProps is accessible
+          const updateActionToUndo = actionToUndo as Extract<ActionType, { type: 'update' }>;
+          setCanvasObjects(prev => prev.map(obj => 
+            obj.id === updateActionToUndo.objectId ? safeUpdateObject(obj, updateActionToUndo.prevProps) : obj
+          ));
+          break;
+        case 'reorder':
+          // For reorder, we'd need to have the previous order saved
+          // This would require more complex history tracking
+          break;
+      }
+      
+      setHistoryIndex(historyIndex - 1);
+    }
+  }, [history, historyIndex, canvasObjects, setCanvasObjects]);
+  
+  // Redo function
+  const redo = useCallback(() => {
+    if (historyIndex < history.length - 1) {
+      const nextAction = history[historyIndex + 1];
+      
+      // Re-execute the action
+      switch (nextAction.type) {
+        case 'add':
+          setCanvasObjects(prev => [...prev, nextAction.object]);
+          break;
+        case 'remove':
+          setCanvasObjects(prev => prev.filter(obj => obj.id !== nextAction.objectId));
+          setSelectedIds(prev => prev.filter(id => id !== nextAction.objectId));
+          break;
+        case 'update':
+          setCanvasObjects(prev => prev.map(obj => 
+            obj.id === nextAction.objectId ? safeUpdateObject(obj, nextAction.newProps) : obj
+          ));
+          break;
+        case 'reorder':
+          setCanvasObjects(prev => {
+            // Create a map of id => index
+            const orderMap = new Map(nextAction.objectIds.map((id, index) => [id, index]));
+            
+            // Sort objects based on new order
+            return [...prev].sort((a, b) => {
+              const aOrder = orderMap.get(a.id) ?? Infinity;
+              const bOrder = orderMap.get(b.id) ?? Infinity;
+              return aOrder - bOrder;
+            });
+          });
+          break;
+      }
+      
+      setHistoryIndex(historyIndex + 1);
+    }
+  }, [history, historyIndex, setCanvasObjects]);
+
+  const updateMultipleObjects = useCallback(
+    (updates: { id: string; attrs: UpdateObjectProps }[], save: boolean = true) => {
+      setCanvasObjects(prev => {
+        const newObjects = [...prev];
+        // Store updates for history, ensuring each is a valid ActionType['update'] payload
+        const historyActionPayloads: Extract<ActionType, {type: 'update'}>[] = [];
+
+        updates.forEach(({ id, attrs }) => {
+          const index = newObjects.findIndex(obj => obj.id === id);
+          if (index >= 0) {
+            const originalObject = newObjects[index];
+            
+            const currentPrevProps: UpdateObjectProps = {};
+            const currentNewProps: UpdateObjectProps = {}; // These are the *actual* changes from attrs
+            let hasChanged = false;
+
+            // Iterate over keys in attrs (which is UpdateObjectProps)
+            // to build prevProps and newProps for history, containing only what changed.
+            for (const key in attrs) {
+              const typedKey = key as keyof UpdateObjectProps;
+              if (originalObject[typedKey] !== attrs[typedKey]) {
+                (currentPrevProps as any)[typedKey] = originalObject[typedKey];
+                (currentNewProps as any)[typedKey] = attrs[typedKey];
+                hasChanged = true;
+              }
+            }
+
+            if (hasChanged) {
+              // Apply the update to the object in the current state
+              newObjects[index] = safeUpdateObject(originalObject, attrs); 
+
+              // If saving to history, and there were actual changes, prepare payload for executeAction
+              if (save && (Object.keys(currentPrevProps).length > 0 || Object.keys(currentNewProps).length > 0)) {
+                historyActionPayloads.push({
+                  type: 'update',
+                  objectId: id,
+                  prevProps: currentPrevProps,
+                  newProps: currentNewProps,
+                });
+              }
+            }
+          }
+        });
+
+        // Dispatch all history actions after processing all updates for this batch
+        if (save && historyActionPayloads.length > 0) {
+          historyActionPayloads.forEach(payload => executeAction(payload));
+        }
+        return newObjects;
+      });
+    },
+    [executeAction] // executeAction encapsulates setCanvasObjects, setUndoStack, setRedoStack
+  );
+
+  const handleObjectUpdate = useCallback(
+    (objectId: string, changedProps: Partial<Konva.NodeConfig>, saveHistory: boolean = true) => { // Used Konva.NodeConfig
+      const safeAttrs: UpdateObjectProps = {};
+      // Define keys that are part of UpdateObjectProps (i.e., common CanvasObject props except id/type)
+      const commonKeys: (keyof UpdateObjectProps)[] = [
+        'x', 'y', 'width', 'height', 'rotation', 
+        'selected', 'zIndex', 'fill', 'stroke', 'strokeWidth'
+        // Ensure this list matches properties in CanvasObject intended for generic updates
+      ];
+
+      for (const key of commonKeys) {
+        if (key in changedProps && changedProps[key] !== undefined) {
+          // This assignment is a simplification. For full type safety,
+          // one might need to validate/transform changedProps[key] based on the specific key.
+          (safeAttrs as any)[key] = changedProps[key];
+        }
+      }
+      
+      if (Object.keys(safeAttrs).length > 0) { // Only update if there are valid props to apply
+          updateMultipleObjects([{ id: objectId, attrs: safeAttrs }], saveHistory);
+      }
+    },
+    [updateMultipleObjects]
+  );
+
+  // Update object properties with history tracking
+  const updateObject = useCallback((id: string, newAttrs: Partial<AnyCanvasObject>, save: boolean = false) => {
+    // Find the current object properties
+    const currentObject = canvasObjects.find(obj => obj.id === id);
+    if (!currentObject) return;
+    
+    // Extract only the properties that are being changed
+    const changedProps: Partial<AnyCanvasObject> = {};
+    const prevProps: Partial<AnyCanvasObject> = {};
+    
+    Object.keys(newAttrs).forEach(key => {
+      const typedKey = key as keyof AnyCanvasObject;
+      if (newAttrs[typedKey] !== currentObject[typedKey]) {
+        changedProps[typedKey] = newAttrs[typedKey];
+        prevProps[typedKey] = currentObject[typedKey];
+      }
+    });
+    
+    // Only proceed if there are actual changes
+    if (Object.keys(changedProps).length === 0) return;
+    
+    // Apply the update
+    setCanvasObjects(prev => 
+      prev.map(obj => (obj.id === id ? safeUpdateObject(obj, changedProps) : obj))
+    );
+    
+    // Save to history if requested
+    if (save) {
+      executeAction({
+        type: 'update',
+        objectId: id,
+        prevProps,
+        newProps: changedProps
+      });
+    }
+  }, [canvasObjects, setCanvasObjects, executeAction]);
+  
+  // Calculate grid lines based on current position and scale
+  const getGridLines = useCallback(() => {
+    if (!showGrid) return { horizontal: [], vertical: [] };
+    
+    const stageWidth = window.innerWidth;
+    const stageHeight = window.innerHeight;
+    
+    const gridSpacing = GRID_SIZE * scale;
+    
+    // Calculate visible grid area
+    const startX = Math.floor(-stagePos.x / gridSpacing) * gridSpacing;
+    const endX = stageWidth - stagePos.x + gridSpacing;
+    const startY = Math.floor(-stagePos.y / gridSpacing) * gridSpacing;
+    const endY = stageHeight - stagePos.y + gridSpacing;
+    
+    const horizontal: { key: string; points: number[] }[] = [];
+    const vertical: { key: string; points: number[] }[] = [];
+    
+    // Generate horizontal grid lines
+    for (let y = startY; y < endY; y += gridSpacing) {
+      horizontal.push({
+        key: `h-${y}`,
+        points: [0, y + stagePos.y, stageWidth, y + stagePos.y],
+      });
+    }
+    
+    // Generate vertical grid lines
+    for (let x = startX; x < endX; x += gridSpacing) {
+      vertical.push({
+        key: `v-${x}`,
+        points: [x + stagePos.x, 0, x + stagePos.x, stageHeight],
+      });
+    }
+    
+    return { horizontal, vertical };
+  }, [stagePos, scale, showGrid]);
+  
+  // Calculate visible viewport for culling
+  const updateVisibleBounds = useCallback(() => {
+    if (!stageRef.current) return;
+    
+    const stage = stageRef.current;
+    const viewportWidth = stage.width();
+    const viewportHeight = stage.height();
+    
+    // Calculate the visible area in canvas coordinates (with buffer for smoother experience)
+    visibleBounds.minX = -stagePos.x / scale - CULLING_BUFFER;
+    visibleBounds.minY = -stagePos.y / scale - CULLING_BUFFER;
+    visibleBounds.maxX = (viewportWidth - stagePos.x) / scale + CULLING_BUFFER;
+    visibleBounds.maxY = (viewportHeight - stagePos.y) / scale + CULLING_BUFFER;
+  }, [stagePos, scale, visibleBounds]);
+  
+  // Check if an object is visible in the current viewport
+  const isObjectVisible = useCallback((obj: CanvasObject) => {
+    // Check if object bounds overlap with visible viewport
+    const objRight = obj.x + obj.width;
+    const objBottom = obj.y + obj.height;
+    
+    return (
+      objRight >= visibleBounds.minX &&
+      obj.x <= visibleBounds.maxX &&
+      objBottom >= visibleBounds.minY &&
+      obj.y <= visibleBounds.maxY
+    );
+  }, [visibleBounds]);
+  
+  // Handle wheel events for zooming
+  const handleWheel = useCallback((e: any) => {
+    // In Konva, the native event is in e.evt
+    e.evt.preventDefault();
+    
+    const stage = stageRef.current;
+    if (!stage) return;
+    
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+    
+    const mousePointTo = {
+      x: (pointer.x - stagePos.x) / scale,
+      y: (pointer.y - stagePos.y) / scale,
+    };
+    
+    // Calculate new scale
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const newScale = Math.max(
+      MIN_ZOOM,
+      Math.min(MAX_ZOOM, scale * (1 + direction * ZOOM_SPEED))
+    );
+    
+    // Calculate new position to zoom toward mouse pointer
+    const newPos = {
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    };
+    
+    setScale(newScale);
+    setStagePos(newPos);
+    
+    // Update visible bounds after zoom
+    updateVisibleBounds();
+  }, [scale, stagePos, updateVisibleBounds]);
+  
+  // Handle object selection
+  const handleSelect = useCallback((e: any, imageId: string) => {
+    // Get key states from the event
+    const isShift = e.evt.shiftKey || isShiftPressed.current;
+    const isCtrl = e.evt.ctrlKey || e.evt.metaKey || isCtrlPressed.current;
+    
+    if (isShift) {
+      // Add or remove from multi-selection
+      setSelectedIds(prev => 
+        prev.includes(imageId)
+          ? prev.filter(id => id !== imageId) // Remove if already selected
+          : [...prev, imageId] // Add to selection
+      );
+    } else if (isCtrl) {
+      // Toggle selection state of clicked item
+      setSelectedIds(prev => 
+        prev.includes(imageId)
+          ? prev.filter(id => id !== imageId)
+          : [...prev, imageId]
+      );
+    } else {
+      // Normal click - select only this item
+      setSelectedIds([imageId]);
+    }
+  }, []);
+  
+  // Handle object drag start
+  const handleObjectDragStart = useCallback(() => {
+    isTransforming.current = true;
+  }, []);
+  
+  // Handle stage drag for panning
+  const handleStageDragStart = useCallback((e: any) => {
+    // Only pan if clicking on empty space (the stage itself)
+    if (e.target === e.target.getStage()) {
+      isPanning.current = true;
+      lastPointerPosition.current = e.target.getPointerPosition();
+      
+      // If not multi-selecting, deselect all objects
+      if (!isShiftPressed.current && !isCtrlPressed.current) {
+        setSelectedIds([]);
+      }
+      
+      // Start multi-selection if shift is pressed
+      if (isShiftPressed.current || isCtrlPressed.current) {
+        setIsMultiSelectMode(true);
+        setSelectionStart({
+          x: (e.evt.offsetX - stagePos.x) / scale,
+          y: (e.evt.offsetY - stagePos.y) / scale
+        });
+        setSelectionRect({
+          x: (e.evt.offsetX - stagePos.x) / scale,
+          y: (e.evt.offsetY - stagePos.y) / scale,
+          width: 0,
+          height: 0
+        });
+      }
+    }
+  }, [scale, stagePos]);
+  
+  const handleStageDragMove = useCallback((e: any) => {
+    if (!isPanning.current && !isMultiSelectMode) return;
+    
+    const stage = e.target.getStage();
+    const pointer = stage.getPointerPosition();
+    
+    if (isMultiSelectMode && selectionStart) {
+      // Update selection rectangle
+      const mousePos = {
+        x: (e.evt.offsetX - stagePos.x) / scale,
+        y: (e.evt.offsetY - stagePos.y) / scale
+      };
+      
+      const newRect = {
+        x: Math.min(selectionStart.x, mousePos.x),
+        y: Math.min(selectionStart.y, mousePos.y),
+        width: Math.abs(mousePos.x - selectionStart.x),
+        height: Math.abs(mousePos.y - selectionStart.y)
+      };
+      
+      setSelectionRect(newRect);
+    } else if (isPanning.current && pointer) {
+      // Pan the stage
+      const dx = pointer.x - lastPointerPosition.current.x;
+      const dy = pointer.y - lastPointerPosition.current.y;
+      
+      setStagePos(prev => ({
+        x: prev.x + dx,
+        y: prev.y + dy,
+      }));
+      
+      lastPointerPosition.current = pointer;
+      
+      // Update visible bounds after pan
+      updateVisibleBounds();
+    }
+  }, [isMultiSelectMode, scale, selectionStart, stagePos, updateVisibleBounds]);
+  
+  const handleStageDragEnd = useCallback(() => {
+    if (isMultiSelectMode && selectionRect) {
+      // Select all objects within selection rectangle
+      const newSelection = canvasObjects.filter(img => {
+        const imgRight = img.x + img.width;
+        const imgBottom = img.y + img.height;
+        
+        return (
+          img.x <= selectionRect.x + selectionRect.width &&
+          imgRight >= selectionRect.x &&
+          img.y <= selectionRect.y + selectionRect.height &&
+          imgBottom >= selectionRect.y
+        );
+      }).map(img => img.id);
+      
+      // Update selection - either add to current or replace
+      if (isShiftPressed.current || isCtrlPressed.current) {
+        setSelectedIds(prev => {
+          const combined = [...prev];
+          newSelection.forEach(id => {
+            if (!combined.includes(id)) {
+              combined.push(id);
+            }
+          });
+          return combined;
+        });
+      } else {
+        setSelectedIds(newSelection);
+      }
+      
+      // Reset selection mode and rectangle
+      setIsMultiSelectMode(false);
+      setSelectionRect(null);
+      setSelectionStart(null);
+    }
+    
+    isPanning.current = false;
+  }, [canvasObjects, isMultiSelectMode, selectionRect]);
+  
+  // Move selected objects one layer forward
+  const moveSelectedObjectsForward = useCallback(() => {
+    if (selectedIds.length === 0) return;
+    
+    // Get all object IDs in current order
+    const objectIds = canvasObjects.map(obj => obj.id);
+    
+    // For each selected object, move it one position forward in the array
+    const newOrder = [...objectIds];
+    
+    selectedIds.forEach(id => {
+      const currentIndex = newOrder.indexOf(id);
+      if (currentIndex < newOrder.length - 1) {
+        // Swap with the next item
+        [newOrder[currentIndex], newOrder[currentIndex + 1]] = 
+        [newOrder[currentIndex + 1], newOrder[currentIndex]];
+      }
+    });
+    
+    // Reorder based on new indices
+    executeAction({
+      type: 'reorder',
+      objectIds: newOrder
+    });
+  }, [executeAction, canvasObjects, selectedIds]);
+  
+  // Move selected objects one layer backward
+  const moveSelectedObjectsBackward = useCallback(() => {
+    if (selectedIds.length === 0) return;
+    
+    // Get all object IDs in current order
+    const objectIds = canvasObjects.map(obj => obj.id);
+    
+    // For each selected object, move it one position backward in the array
+    const newOrder = [...objectIds];
+    
+    // Process in reverse order to avoid index shifting problems
+    [...selectedIds].reverse().forEach(id => {
+      const currentIndex = newOrder.indexOf(id);
+      if (currentIndex > 0) {
+        // Swap with the previous item
+        [newOrder[currentIndex], newOrder[currentIndex - 1]] = 
+        [newOrder[currentIndex - 1], newOrder[currentIndex]];
+      }
+    });
+    
+    // Reorder based on new indices
+    executeAction({
+      type: 'reorder',
+      objectIds: newOrder
+    });
+  }, [executeAction, canvasObjects, selectedIds]);
+  
+  // Bring selected objects to front
+  const bringSelectedObjectsToFront = useCallback(() => {
+    if (selectedIds.length === 0) return;
+    
+    // Get all object IDs in current order
+    const objectIds = canvasObjects.map(obj => obj.id);
+    
+    // Filter out selected IDs
+    const unselectedIds = objectIds.filter(id => !selectedIds.includes(id));
+    
+    // Create new order with selected IDs at the end (front)
+    const newOrder = [...unselectedIds, ...selectedIds];
+    
+    // Reorder based on new indices
+    executeAction({
+      type: 'reorder',
+      objectIds: newOrder
+    });
+  }, [executeAction, canvasObjects, selectedIds]);
+  
+  // Send selected objects to back
+  const sendSelectedObjectsToBack = useCallback(() => {
+    if (selectedIds.length === 0) return;
+    
+    // Get all object IDs in current order
+    const objectIds = canvasObjects.map(obj => obj.id);
+    
+    // Filter out selected IDs
+    const unselectedIds = objectIds.filter(id => !selectedIds.includes(id));
+    
+    // Create new order with selected IDs at the beginning (back)
+    const newOrder = [...selectedIds, ...unselectedIds];
+    
+    // Reorder based on new indices
+    executeAction({
+      type: 'reorder',
+      objectIds: newOrder
+    });
+  }, [executeAction, canvasObjects, selectedIds]);
+  
+  // Toggle grid visibility
+  const toggleGrid = useCallback(() => {
+    setShowGrid(prev => !prev);
+  }, []);
+  
+  // Keyboard event handlers
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // Track modifier keys
+    if (e.key === 'Shift') isShiftPressed.current = true;
+    if (e.key === 'Control' || e.key === 'Meta') isCtrlPressed.current = true;
+    
+    // Handle keyboard shortcuts
+    if (e.ctrlKey || e.metaKey) { // Ctrl/Cmd key combinations
+      if (KEYBOARD_SHORTCUTS.UNDO.includes(e.key.toLowerCase())) {
+        e.preventDefault();
+        undo();
+      } else if (KEYBOARD_SHORTCUTS.REDO.includes(e.key)) {
+        e.preventDefault();
+        redo();
+      } else if (KEYBOARD_SHORTCUTS.COPY.includes(e.key.toLowerCase())) {
+        e.preventDefault();
+        // Copy selected canvasObjects to clipboard
+        const itemsToCopy = canvasObjects.filter(img => selectedIds.includes(img.id));
+        setClipboard(itemsToCopy);
+      } else if (KEYBOARD_SHORTCUTS.PASTE.includes(e.key.toLowerCase())) {
+        e.preventDefault();
+        // Paste clipboard items
+        clipboard.forEach(item => {
+          const newItem = {
+            ...item,
+            id: `${item.type}-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            x: item.x + 20, // Offset pasted items
+            y: item.y + 20,
+          };
+          executeAction({ type: 'add', object: newItem });
+        });
+      } else if (KEYBOARD_SHORTCUTS.SELECT_ALL.includes(e.key.toLowerCase())) {
+        e.preventDefault();
+        // Select all canvasObjects
+        setSelectedIds(canvasObjects.map(obj => obj.id));
+      }
+    } else { // Regular key shortcuts
+      if (KEYBOARD_SHORTCUTS.DELETE.includes(e.key)) {
+        if (selectedIds.length > 0) {
+          // Delete selected canvasObjects
+          selectedIds.forEach(id => {
+            executeAction({ type: 'remove', objectId: id });
+          });
+          setSelectedIds([]);
+        }
+      } else if (KEYBOARD_SHORTCUTS.DESELECT.includes(e.key)) {
+        // Deselect all
+        setSelectedIds([]);
+      } else if (KEYBOARD_SHORTCUTS.TOGGLE_GRID.includes(e.key.toLowerCase())) {
+        // Toggle grid visibility
+        setShowGrid(prev => !prev);
+      } else if (KEYBOARD_SHORTCUTS.SNAP_TOGGLE.includes(e.key.toLowerCase())) {
+        // Toggle snap to grid
+        setSnapToGrid(prev => !prev);
+      }
+    }
+    
+    // Handle arrow keys for moving selected objects
+    if (selectedIds.length > 0) {
+      const moveDistance = 10 / scale; // Adjust distance based on zoom level
+      
+      if (KEYBOARD_SHORTCUTS.MOVE_UP.includes(e.key)) {
+        e.preventDefault();
+        const updates = selectedIds.map(id => ({
+          id,
+          attrs: { y: canvasObjects.find(obj => obj.id === id)!.y - moveDistance }
+        }));
+        updateMultipleObjects(updates, true);
+      } else if (KEYBOARD_SHORTCUTS.MOVE_DOWN.includes(e.key)) {
+        e.preventDefault();
+        const updates = selectedIds.map(id => ({
+          id,
+          attrs: { y: canvasObjects.find(obj => obj.id === id)!.y + moveDistance }
+        }));
+        updateMultipleObjects(updates, true);
+      } else if (KEYBOARD_SHORTCUTS.MOVE_LEFT.includes(e.key)) {
+        e.preventDefault();
+        const updates = selectedIds.map(id => ({
+          id,
+          attrs: { x: canvasObjects.find(obj => obj.id === id)!.x - moveDistance }
+        }));
+        updateMultipleObjects(updates, true);
+      } else if (KEYBOARD_SHORTCUTS.MOVE_RIGHT.includes(e.key)) {
+        e.preventDefault();
+        const updates = selectedIds.map(id => ({
+          id,
+          attrs: { x: canvasObjects.find(obj => obj.id === id)!.x + moveDistance }
+        }));
+        updateMultipleObjects(updates, true);
+      }
+      
+      // Object layering shortcuts
+      if (KEYBOARD_SHORTCUTS.LAYER_FORWARD.includes(e.key)) {
+        // Move selected objects one layer forward
+        moveSelectedObjectsForward();
+      } else if (KEYBOARD_SHORTCUTS.LAYER_BACKWARD.includes(e.key)) {
+        // Move selected objects one layer backward
+        moveSelectedObjectsBackward();
+      } else if (KEYBOARD_SHORTCUTS.LAYER_FRONT.includes(e.key)) {
+        // Bring selected objects to front
+        bringSelectedObjectsToFront();
+      } else if (KEYBOARD_SHORTCUTS.LAYER_BACK.includes(e.key)) {
+        // Send selected objects to back
+        sendSelectedObjectsToBack();
+      }
+    }
+  }, [
+    clipboard, 
+    executeAction, 
+    canvasObjects, 
+    redo, 
+    scale, 
+    selectedIds, 
+    undo, 
+    updateMultipleObjects,
+    moveSelectedObjectsForward,
+    moveSelectedObjectsBackward,
+    bringSelectedObjectsToFront,
+    sendSelectedObjectsToBack
+  ]);
+  
+  const handleKeyUp = useCallback((e: KeyboardEvent) => {
+    if (e.key === 'Shift') isShiftPressed.current = false;
+    if (e.key === 'Control' || e.key === 'Meta') isCtrlPressed.current = false;
+  }, []);
+
+  // Set up keyboard event listeners
+  useEffect(() => {
+    // Initialize visible bounds
+    updateVisibleBounds();
+    
+    // Add keyboard event listeners
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    
+    // Clean up
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      
+      // Cancel any pending animation frames
+      if (requestAnimationFrameId.current !== null) {
+        cancelAnimationFrame(requestAnimationFrameId.current);
+      }
+    };
+  }, [handleKeyDown, handleKeyUp, updateVisibleBounds]);
+  
+  // Calculate grid lines
+  const { horizontal, vertical } = getGridLines();
+  
+  // Filter canvasObjects to only render visible ones (viewport culling)
+  const visibleObjects = useMemo(() => {
+    return canvasObjects.filter(isObjectVisible).sort((a, b) => a.zIndex - b.zIndex);
+  }, [canvasObjects, isObjectVisible]);
+
+  // Perform grid snap
+  const performGridSnap = useCallback((point: { x: number; y: number }) => {
+    if (!snapToGrid) return point;
+    
+    // Snap to nearest grid point
+    return {
+      x: Math.round(point.x / GRID_SIZE) * GRID_SIZE,
+      y: Math.round(point.y / GRID_SIZE) * GRID_SIZE
+    };
+  }, [snapToGrid]);
+
+  return (
+    <div className="infinite-canvas-container" style={{ width: '100%', height: '100vh', overflow: 'hidden', position: 'relative' }}>
+      <Stage
+        ref={stageRef}
+        width={window.innerWidth}
+        height={window.innerHeight}
+        x={stagePos.x}
+        y={stagePos.y}
+        scaleX={scale}
+        scaleY={scale}
+        onWheel={handleWheel}
+        onMouseDown={handleStageDragStart}
+        onMouseMove={handleStageDragMove}
+        onMouseUp={handleStageDragEnd}
+      >
+        <Layer ref={layerRef}>
+          {/* Background */}
+          <Rect
+            x={-10000}
+            y={-10000}
+            width={20000}
+            height={20000}
+            fill={BACKGROUND_COLOR}
+          />
+          
+          {/* Grid lines */}
+          {showGrid && (
+            <Group>
+              {horizontal.map(line => (
+                <Line
+                  key={line.key}
+                  points={line.points}
+                  stroke={GRID_COLOR}
+                  strokeWidth={1 / scale} // Adjust line width based on zoom
+                  listening={false}
+                />
+              ))}
+              {vertical.map(line => (
+                <Line
+                  key={line.key}
+                  points={line.points}
+                  stroke={GRID_COLOR}
+                  strokeWidth={1 / scale} // Adjust line width based on zoom
+                  listening={false}
+                />
+              ))}
+            </Group>
+          )}
+          
+          {/* Selection rectangle for multi-select */}
+          {selectionRect && (
+            <Rect
+              x={selectionRect.x}
+              y={selectionRect.y}
+              width={selectionRect.width}
+              height={selectionRect.height}
+              fill="rgba(0, 150, 255, 0.1)"
+              stroke="rgba(0, 150, 255, 0.8)"
+              strokeWidth={1 / scale}
+              dash={[5 / scale, 5 / scale]}
+              listening={false}
+            />
+          )}
+          
+          {/* Canvas objects - only render visible ones */}
+          {visibleObjects.map(obj => (
+            <CanvasObjectRenderer
+              key={obj.id}
+              object={obj}
+              isSelected={selectedIds.includes(obj.id)}
+              snapToGrid={performGridSnap} // Use renamed function
+              onSelect={handleSelect}
+              onChange={handleObjectUpdate} // Use handleObjectUpdate for consistency
+              onDragStart={handleObjectDragStart} // Centralized drag start logic
+            />
+          ))}
+        </Layer>
+      </Stage>
+      
+      {/* UI controls */}
+      <div className="canvas-toolbar" style={{
+        position: 'absolute',
+        top: '20px',
+        left: '20px',
+        display: 'flex',
+        gap: '10px',
+        background: 'rgba(255, 255, 255, 0.8)',
+        padding: '10px',
+        borderRadius: '8px',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+        zIndex: 100
+      }}>
+        {/* Image upload button */}
+        <label htmlFor="image-upload" style={{
+          padding: '8px 12px',
+          background: '#ffffff',
+          border: '1px solid #ccc',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}>
+          <span role="img" aria-label="Add Image" style={{ marginRight: '5px' }}>🖼️</span>
+          <input
+            id="image-upload"
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              if (e.target.files && e.target.files[0]) {
+                const file = e.target.files[0];
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                  if (event.target?.result) {
+                    const img = new Image();
+                    img.onload = () => {
+                      const aspectRatio = img.width / img.height;
+                      const newImage: CanvasImage = {
+                        id: `img-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                        type: 'image',
+                        url: event.target?.result as string,
+                        x: 0,
+                        y: 0,
+                        width: 200,
+                        height: 200 / aspectRatio,
+                        aspectRatio,
+                        zIndex: canvasObjects.length + 1,
+                        selected: false
+                      };
+                      executeAction({ type: 'add', object: newImage });
+                      if (onAddImage) onAddImage(newImage);
+                    };
+                    img.src = event.target?.result as string;
+                  }
+                };
+                reader.readAsDataURL(file);
+              }
+              // Reset the input so the same file can be selected again
+              e.target.value = '';
+            }}
+          />
+          Add Image
+        </label>
+
+        {/* Add Text button */}
+        <button onClick={() => {
+          const newText: CanvasText = {
+            id: `text-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            type: 'text',
+            text: 'New Text',
+            fontSize: 24,
+            fontFamily: 'Arial',
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 30,
+            zIndex: canvasObjects.length + 1,
+            fill: '#000000',
+            selected: false
+          };
+          executeAction({ type: 'add', object: newText });
+        }} style={{
+          padding: '8px 12px',
+          background: '#ffffff',
+          border: '1px solid #ccc',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}>
+          <span role="img" aria-label="Add Text" style={{ marginRight: '5px' }}>📝</span>
+          Add Text
+        </button>
+
+        {/* Add Rectangle button */}
+        <button onClick={() => {
+          const newRect: CanvasRectangle = {
+            id: `rect-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            type: 'rectangle',
+            x: 0,
+            y: 0,
+            width: 150,
+            height: 100,
+            zIndex: canvasObjects.length + 1,
+            fill: '#ffffff',
+            stroke: '#000000',
+            strokeWidth: 2,
+            selected: false
+          };
+          executeAction({ type: 'add', object: newRect });
+        }} style={{
+          padding: '8px 12px',
+          background: '#ffffff',
+          border: '1px solid #ccc',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}>
+          <span role="img" aria-label="Add Rectangle" style={{ marginRight: '5px' }}>⬜</span>
+          Add Rectangle
+        </button>
+
+        {/* Add Circle button */}
+        <button onClick={() => {
+          const newCircle: CanvasCircle = {
+            id: `circle-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            type: 'circle',
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            zIndex: canvasObjects.length + 1,
+            fill: '#ffffff',
+            stroke: '#000000',
+            strokeWidth: 2,
+            selected: false
+          };
+          executeAction({ type: 'add', object: newCircle });
+        }} style={{
+          padding: '8px 12px',
+          background: '#ffffff',
+          border: '1px solid #ccc',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}>
+          <span role="img" aria-label="Add Circle" style={{ marginRight: '5px' }}>⭕</span>
+          Add Circle
+        </button>
       </div>
 
-      {/* Add Image Modal */}
-      {showAddImageModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-20">
-          <div className="bg-white rounded-lg p-6 w-96">
-            <h3 className="text-lg font-medium mb-4">Add Image from URL</h3>
-            <input
-              type="text"
-              value={imageUrl}
-              onChange={(e) => setImageUrl(e.target.value)}
-              placeholder="Enter image URL"
-              className="w-full p-2 border rounded mb-4"
-            />
-            <div className="flex justify-end gap-2">
-              <button className="px-4 py-2 bg-gray-200 rounded" onClick={() => setShowAddImageModal(false)}>
-                Cancel
-              </button>
-              <button className="px-4 py-2 bg-blue-500 text-white rounded" onClick={addImageFromUrl}>
-                Add
-              </button>
-            </div>
-          </div>
+      {/* Canvas controls */}
+      <div className="canvas-controls" style={{
+        position: 'absolute',
+        bottom: '20px',
+        right: '20px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '10px',
+        background: 'rgba(255, 255, 255, 0.8)',
+        padding: '10px',
+        borderRadius: '8px',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+        zIndex: 100
+      }}>
+        <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
+          <button onClick={toggleGrid} style={{
+            padding: '8px 12px',
+            background: showGrid ? '#0096FF' : '#ffffff',
+            color: showGrid ? '#ffffff' : '#333333',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            cursor: 'pointer'
+          }}>
+            {showGrid ? 'Hide Grid' : 'Show Grid'}
+          </button>
+          <button onClick={() => setSnapToGrid(!snapToGrid)} style={{
+            padding: '8px 12px',
+            background: snapToGrid ? '#0096FF' : '#ffffff',
+            color: snapToGrid ? '#ffffff' : '#333333',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            cursor: 'pointer'
+          }}>
+            {snapToGrid ? 'Snap On' : 'Snap Off'}
+          </button>
         </div>
-      )}
+        
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button onClick={() => {
+            setStagePos({ x: 0, y: 0 });
+            setScale(1);
+            updateVisibleBounds();
+          }} style={{
+            padding: '8px 12px',
+            background: '#ffffff',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            cursor: 'pointer'
+          }}>
+            Reset View
+          </button>
+          
+          {selectedIds.length > 0 && (
+            <button onClick={() => {
+              selectedIds.forEach(id => {
+                executeAction({ type: 'remove', objectId: id });
+              });
+              setSelectedIds([]);
+            }} style={{
+              padding: '8px 12px',
+              background: '#ff3b30',
+              color: '#ffffff',
+              border: '1px solid #d42d28',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}>
+              Delete Selected
+            </button>
+          )}
+        </div>
+        
+        {selectedIds.length > 0 && (
+          <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+            <button onClick={moveSelectedObjectsBackward} title="Move backward" style={{
+              padding: '6px 12px',
+              background: '#ffffff',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}>
+              [
+            </button>
+            <button onClick={moveSelectedObjectsForward} title="Move forward" style={{
+              padding: '6px 12px',
+              background: '#ffffff',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}>
+              ]
+            </button>
+            <button onClick={sendSelectedObjectsToBack} title="Send to back" style={{
+              padding: '6px 12px',
+              background: '#ffffff',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}>
+              {"{"}
+            </button>
+            <button onClick={bringSelectedObjectsToFront} title="Bring to front" style={{
+              padding: '6px 12px',
+              background: '#ffffff',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}>
+              {"}"}  
+            </button>
+          </div>
+        )}
+        
+        {/* Zoom controls */}
+        <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+          <button onClick={() => {
+            const newScale = Math.max(MIN_ZOOM, scale * 0.9);
+            setScale(newScale);
+            updateVisibleBounds();
+          }} style={{ 
+            padding: '6px 12px',
+            background: '#ffffff',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            cursor: 'pointer'
+          }}>
+            -
+          </button>
+          <div style={{ 
+            padding: '6px 0', 
+            minWidth: '60px', 
+            textAlign: 'center',
+            background: '#ffffff',
+            border: '1px solid #ccc',
+            borderRadius: '4px'
+          }}>
+            {Math.round(scale * 100)}%
+          </div>
+          <button onClick={() => {
+            const newScale = Math.min(MAX_ZOOM, scale * 1.1);
+            setScale(newScale);
+            updateVisibleBounds();
+          }} style={{ 
+            padding: '6px 12px',
+            background: '#ffffff',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            cursor: 'pointer'
+          }}>
+            +
+          </button>
+        </div>
+      </div>
     </div>
-  )
-}
+  );
+
+};
+
+export default InfiniteCanvas;

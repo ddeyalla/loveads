@@ -410,7 +410,7 @@ export default function Home() {
       <div className="absolute w-80 h-80 bg-purple-200 opacity-30 rounded-full blur-2xl left-0 bottom-12"></div>
       {/* Noise texture overlay */}
       <div className="pointer-events-none absolute inset-0 z-10 bg-[url('https://www.transparenttextures.com/patterns/3px-tile.png')] opacity-100 mix-blend-overlay"></div>
-      <div className="container mx-auto px-4 py-6 flex-1 flex flex-col">
+      <div className="container mx-auto px-4 py-6 flex-1 flex flex-col min-h-[calc(100vh-80px)]">
         {/* Header - Sticky */}
         <header className="flex justify-between items-center sticky top-0 z-10">
           <div className="flex items-center gap-2">
@@ -421,7 +421,7 @@ export default function Home() {
         </header>
 
         {/* Main Content */}
-        <main className="flex flex-col items-center justify-center flex-1 max-w-3xl mx-auto w-full">
+        <main className="flex flex-col items-center justify-center flex-1 w-full max-w-3xl mx-auto">
           <h1 className="text-4xl md:text-5xl font-bold text-center">What are we designing today?</h1>
           <p className="mt-4 text-center text-base">Concept to ads, with your personal marketing team</p>
 

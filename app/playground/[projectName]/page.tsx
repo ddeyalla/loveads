@@ -4,7 +4,19 @@ import { useState, useEffect, useRef } from "react"
 import { Heart, ChevronDown, Search, ImageIcon, ArrowUp, MoreHorizontal } from "lucide-react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import InfiniteCanvas from "@/components/infinite-canvas"
+import dynamic from 'next/dynamic';
+
+// Import types from infinite-canvas
+import type { CanvasImage, CanvasText, CanvasRectangle, CanvasCircle, AnyCanvasObject, InfiniteCanvasProps } from '@/components/infinite-canvas';
+
+// Use a more robust dynamic import approach
+const DynamicInfiniteCanvas = dynamic<InfiniteCanvasProps>(
+  () => import('@/components/infinite-canvas').then((mod) => mod.default),
+  { 
+    ssr: false,
+    loading: () => <div className="flex items-center justify-center h-full w-full bg-gray-50">Loading canvas...</div>
+  }
+);
 
 // Types for our chat messages
 type MessageType = "user" | "agent" | "planning" | "research" | "creative" | "generation"
@@ -26,18 +38,7 @@ interface PlanningStep {
   status: "pending" | "active" | "completed"
 }
 
-// Canvas image type
-interface CanvasImage {
-  id: string
-  url: string
-  x: number
-  y: number
-  width: number
-  height: number
-  aspectRatio: number
-  rotation?: number
-  selected?: boolean
-}
+// Using the CanvasImage type imported from infinite-canvas component
 
 export default function PlaygroundPage() {
   const params = useParams()
@@ -48,8 +49,8 @@ export default function PlaygroundPage() {
   const [inputValue, setInputValue] = useState("")
   const [isLoading, setIsLoading] = useState(false)
 
-  // State for canvas
-  const [canvasImages, setCanvasImages] = useState<CanvasImage[]>([])
+  // State for the canvas objects
+  const [canvasObjects, setCanvasObjects] = useState<AnyCanvasObject[]>([])
   const [zoomLevel, setZoomLevel] = useState(25)
   const [showProjectMenu, setShowProjectMenu] = useState(false)
   const [showZoomMenu, setShowZoomMenu] = useState(false)
@@ -231,17 +232,19 @@ export default function PlaygroundPage() {
     // Position images next to each other with 40px spacing
     const positionedImages = sampleImages.map((img, index) => {
       // Calculate x position based on previous images' widths and spacing
-      const previousWidth = sampleImages.slice(0, index).reduce((total, img) => total + img.width, 0)
+      const previousWidth = sampleImages.slice(0, index).reduce((total, i) => total + i.width, 0)
       const spacingWidth = index * 40 // 40px spacing between images
 
       return {
         ...img,
+        type: "image" as const,
         x: previousWidth + spacingWidth,
         y: 0, // All aligned at the top
+        zIndex: 0,
       }
     })
 
-    setCanvasImages(positionedImages)
+    setCanvasObjects(positionedImages)
 
     // Add a message about the generated images
     const generationMessage: Message = {
@@ -460,7 +463,7 @@ export default function PlaygroundPage() {
 
         {/* Canvas area - 75% width */}
         <div className="flex-1 bg-white overflow-hidden">
-          <InfiniteCanvas images={canvasImages} setImages={setCanvasImages} />
+          <DynamicInfiniteCanvas canvasObjects={canvasObjects} setCanvasObjects={setCanvasObjects} />
         </div>
       </div>
     </div>
