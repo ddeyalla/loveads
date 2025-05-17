@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import Konva from "konva"; // Changed to default import
+import Konva from "konva"; 
 import { 
   Stage, 
   Layer, 
@@ -39,6 +39,7 @@ export interface CanvasImage extends CanvasObject {
   type: 'image';
   url: string;
   aspectRatio: number;
+  effects?: any[];
 };
 
 // Text specific properties
@@ -76,7 +77,8 @@ export type ActionType =
   | { type: 'add', object: AnyCanvasObject }
   | { type: 'remove', objectId: string }
   | { type: 'update', objectId: string, prevProps: UpdateObjectProps, newProps: UpdateObjectProps }
-  | { type: 'reorder', objectIds: string[] };
+  | { type: 'reorder', objectIds: string[] }
+  | { type: 'add_batch', objects: AnyCanvasObject[] };
 
 // Helper function to safely update canvas objects
 function safeUpdateObject<T extends AnyCanvasObject>(
@@ -291,6 +293,13 @@ const BACKGROUND_COLOR = "#ffffff";
 const SNAP_THRESHOLD = 10; // Grid snapping threshold in pixels
 const CULLING_BUFFER = 200; // Buffer size for viewport culling
 
+// Constants for image layout when adding multiple images
+const IMAGE_LAYOUT_GAP_X = 40;
+const IMAGE_LAYOUT_GAP_Y = 40;
+const IMAGES_PER_ROW_LAYOUT = 5;
+const DEFAULT_LAYOUT_IMAGE_WIDTH = 150;
+const DEFAULT_LAYOUT_IMAGE_HEIGHT = 150;
+
 // Keyboard shortcuts mapping
 const KEYBOARD_SHORTCUTS = {
   DELETE: ['Delete', 'Backspace'],
@@ -418,7 +427,7 @@ const URLImage: React.FC<URLImageProps> = ({ image, isSelected, snapToGrid, onSe
     // Reset scale to avoid accumulation
     node.scaleX(1);
     node.scaleY(1);
-  }, [onChange, doSnap, image.id]); // Depend on renamed doSnap
+  }, [onChange, doSnap, image.id]);
 
   // Calculate pointer events based on loading status
   const pointerEvents = status === "loaded" ? "auto" : "none";
@@ -553,6 +562,9 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
           });
         });
         break;
+      case 'add_batch':
+        setCanvasObjects(prev => [...prev, ...action.objects]);
+        break;
     }
     
     // Update history state
@@ -620,6 +632,15 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
           // For reorder, we'd need to have the previous order saved
           // This would require more complex history tracking
           break;
+        case 'add_batch':
+          setCanvasObjects(prev => prev.filter(obj => 
+            !(actionToUndo as Extract<ActionType, { type: 'add_batch' }>).objects.find(addedObj => addedObj.id === obj.id)
+          ));
+          // Deselect objects that were part of the batch if they were selected
+          setSelectedIds(prevSelected => prevSelected.filter(id => 
+            !(actionToUndo as Extract<ActionType, { type: 'add_batch' }>).objects.find(addedObj => addedObj.id === id)
+          ));
+          break;
       }
       
       setHistoryIndex(historyIndex - 1);
@@ -657,6 +678,11 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
               return aOrder - bOrder;
             });
           });
+          break;
+        case 'add_batch':
+          setCanvasObjects(prev => [...prev, ...(nextAction as Extract<ActionType, { type: 'add_batch' }>).objects]);
+          // Optionally, select the re-added batch of objects
+          // setSelectedIds((nextAction as Extract<ActionType, { type: 'add_batch' }>).objects.map(obj => obj.id));
           break;
       }
       
@@ -750,14 +776,15 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
     if (!currentObject) return;
     
     // Extract only the properties that are being changed
-    const changedProps: Partial<AnyCanvasObject> = {};
-    const prevProps: Partial<AnyCanvasObject> = {};
+    const changedProps: UpdateObjectProps = {};
+    const prevProps: UpdateObjectProps = {};
     
     Object.keys(newAttrs).forEach(key => {
-      const typedKey = key as keyof AnyCanvasObject;
-      if (newAttrs[typedKey] !== currentObject[typedKey]) {
-        changedProps[typedKey] = newAttrs[typedKey];
-        prevProps[typedKey] = currentObject[typedKey];
+      const typedKey = key as keyof UpdateObjectProps; // Cast to key of UpdateObjectProps
+      // Check if the key exists in the current object and the value is different
+      if (currentObject.hasOwnProperty(typedKey) && currentObject[typedKey] !== newAttrs[typedKey]) {
+        (changedProps as any)[typedKey] = newAttrs[typedKey];
+        (prevProps as any)[typedKey] = currentObject[typedKey];
       }
     });
     
@@ -1283,6 +1310,58 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
     };
   }, [snapToGrid]);
 
+  // Helper function to generate unique IDs
+  const generateUniqueId = (prefix: string = 'obj'): string => {
+    return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  };
+
+  // Function to add multiple images in a layout
+  const addImagesInLayout = useCallback((imageUrls: string[], startX: number = 10, startY: number = 10) => {
+    if (!imageUrls || imageUrls.length === 0) return;
+
+    let currentX = startX;
+    let currentY = startY;
+    const newImageObjects: CanvasImage[] = [];
+    
+    // Determine the starting zIndex for new objects
+    const highestZIndex = canvasObjects.length > 0 
+      ? Math.max(...canvasObjects.map(obj => obj.zIndex))
+      : -1;
+
+    imageUrls.forEach((url, index) => {
+      const newImage: CanvasImage = {
+        id: generateUniqueId('image'),
+        type: 'image',
+        url,
+        x: currentX,
+        y: currentY,
+        width: DEFAULT_LAYOUT_IMAGE_WIDTH,
+        height: DEFAULT_LAYOUT_IMAGE_HEIGHT,
+        rotation: 0,
+        zIndex: highestZIndex + 1 + index,
+        aspectRatio: DEFAULT_LAYOUT_IMAGE_WIDTH / DEFAULT_LAYOUT_IMAGE_HEIGHT,
+        effects: [], // Initialize effects
+        selected: false, // Ensure new items are not selected by default
+      };
+      newImageObjects.push(newImage);
+
+      // Advance position for the next image
+      currentX += DEFAULT_LAYOUT_IMAGE_WIDTH + IMAGE_LAYOUT_GAP_X;
+
+      // Check if row needs to wrap
+      if ((index + 1) % IMAGES_PER_ROW_LAYOUT === 0) {
+        currentX = startX; // Reset X to start of the row
+        currentY += DEFAULT_LAYOUT_IMAGE_HEIGHT + IMAGE_LAYOUT_GAP_Y; // Move to next row
+      }
+    });
+
+    if (newImageObjects.length > 0) {
+      // Use executeAction for batch add to handle history correctly
+      executeAction({ type: 'add_batch', objects: newImageObjects });
+      // Do NOT update history state directly here, executeAction handles it
+    }
+  }, [canvasObjects, executeAction]); // Depend on executeAction
+
   return (
     <div className="infinite-canvas-container" style={{ width: '100%', height: '100vh', overflow: 'hidden', position: 'relative' }}>
       <Stage
@@ -1391,38 +1470,40 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
             id="image-upload"
             type="file"
             accept="image/*"
+            multiple // Enable selecting multiple files
+            onClick={(e) => { e.currentTarget.value = ''; }} // Clear previous selection to allow re-selecting same files
             style={{ display: 'none' }}
             onChange={(e) => {
-              if (e.target.files && e.target.files[0]) {
-                const file = e.target.files[0];
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                  if (event.target?.result) {
+              const files = e.target.files;
+              if (files && files.length > 0) {
+                Array.from(files).forEach(file => {
+                  const reader = new FileReader();
+                  reader.onload = (evt: ProgressEvent<FileReader>) => {
+                    const result = evt.target?.result;
+                    if (typeof result !== 'string') return;
                     const img = new Image();
                     img.onload = () => {
                       const aspectRatio = img.width / img.height;
                       const newImage: CanvasImage = {
-                        id: `img-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                        id: generateUniqueId('image'),
                         type: 'image',
-                        url: event.target?.result as string,
+                        url: result,
                         x: 0,
                         y: 0,
                         width: 200,
                         height: 200 / aspectRatio,
                         aspectRatio,
                         zIndex: canvasObjects.length + 1,
-                        selected: false
+                        effects: [],
                       };
                       executeAction({ type: 'add', object: newImage });
                       if (onAddImage) onAddImage(newImage);
                     };
-                    img.src = event.target?.result as string;
-                  }
-                };
-                reader.readAsDataURL(file);
+                    img.src = result;
+                  };
+                  reader.readAsDataURL(file);
+                });
               }
-              // Reset the input so the same file can be selected again
-              e.target.value = '';
             }}
           />
           Add Image
@@ -1431,7 +1512,7 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
         {/* Add Text button */}
         <button onClick={() => {
           const newText: CanvasText = {
-            id: `text-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            id: generateUniqueId('text'),
             type: 'text',
             text: 'New Text',
             fontSize: 24,
@@ -1462,7 +1543,7 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
         {/* Add Rectangle button */}
         <button onClick={() => {
           const newRect: CanvasRectangle = {
-            id: `rect-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            id: generateUniqueId('rect'),
             type: 'rectangle',
             x: 0,
             y: 0,
@@ -1492,7 +1573,7 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ canvasObjects, setCanva
         {/* Add Circle button */}
         <button onClick={() => {
           const newCircle: CanvasCircle = {
-            id: `circle-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            id: generateUniqueId('circle'),
             type: 'circle',
             x: 0,
             y: 0,
