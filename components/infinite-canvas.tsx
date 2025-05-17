@@ -48,14 +48,14 @@ interface InfiniteCanvasProps {
 const GAP = 40; // spacing when adding images in a row
 const DEFAULT_W = 200;
 const DEFAULT_H = 150;
-const SCALE_BY = 1.1; // zoom factor per wheel notch
+const SCALE_BY = 1.04; // smoother zoom factor
 const GRID_SIZE = 100;
 
 
 const URLImage: React.FC<{
   img: CanvasImg;
   selected: boolean;
-  onSelect: (id: string | null) => void;
+  onSelect: (id: string, e?: any) => void;
   onChange: (id: string, attrs: Partial<CanvasImg>) => void;
 }> = ({ img, selected, onSelect, onChange }) => {
   const [image] = useImage(img.src, "anonymous");
@@ -91,11 +91,11 @@ const URLImage: React.FC<{
         draggable
         onClick={(e) => {
           e.cancelBubble = true;
-          onSelect(img.id);
+          onSelect(img.id, e.evt || e);
         }}
         onTap={(e) => {
           e.cancelBubble = true;
-          onSelect(img.id);
+          onSelect(img.id, e.evt || e);
         }}
         onDragStart={(e) => {
           e.target.getStage()?.draggable(false);
@@ -138,6 +138,142 @@ const URLImage: React.FC<{
 
 const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ initialImages = [], showGrid = false }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const stageRef = useRef<Konva.Stage>(null);
+  const groupRef = useRef<Konva.Group>(null);
+
+  const [imgs, setImgs] = useState<CanvasImg[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]); // Multi-select
+  const [scale, setScale] = useState(1);
+  const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
+
+  // Undo/redo stacks
+  const [undoStack, setUndoStack] = useState<CanvasImg[][]>([]);
+  const [redoStack, setRedoStack] = useState<CanvasImg[][]>([]);
+
+  // Push to undo stack on imgs change (not from undo/redo)
+  useEffect(() => {
+    setUndoStack((stack) => [...stack, imgs]);
+    // Clear redo stack on normal change
+    setRedoStack([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imgs]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Delete selected
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length > 0) {
+        setImgs((prev) => prev.filter(img => !selectedIds.includes(img.id)));
+        setSelectedIds([]);
+      }
+      // Cmd/Ctrl+A: select all
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        setSelectedIds(imgs.map(img => img.id));
+      }
+      // Undo: Cmd+Z
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        setUndoStack((prevUndo) => {
+          if (prevUndo.length > 1) {
+            setRedoStack((prevRedo) => [prevUndo[prevUndo.length - 1], ...prevRedo]);
+            setImgs(prevUndo[prevUndo.length - 2]);
+            return prevUndo.slice(0, -1);
+          }
+          return prevUndo;
+        });
+      }
+      // Redo: Cmd+Y
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        setRedoStack((prevRedo) => {
+          if (prevRedo.length > 0) {
+            setUndoStack((prevUndo) => [...prevUndo, prevRedo[0]]);
+            setImgs(prevRedo[0]);
+            return prevRedo.slice(1);
+          }
+          return prevRedo;
+        });
+      }
+      // Zoom in: Cmd/Ctrl + = or +
+      if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        setScale((s) => Math.min(10, s * 1.1));
+      }
+      // Zoom out: Cmd/Ctrl + -
+      if ((e.metaKey || e.ctrlKey) && e.key === '-') {
+        e.preventDefault();
+        setScale((s) => Math.max(0.1, s / 1.1));
+      }
+      // Bring forward: Cmd/Ctrl + ]
+      if ((e.metaKey || e.ctrlKey) && e.key === ']') {
+        e.preventDefault();
+        setImgs((prev) => {
+          const indices = prev.map((img, i) => selectedIds.includes(img.id) ? i : -1).filter(i => i !== -1);
+          if (indices.length === 0) return prev;
+          const maxIdx = Math.max(...indices);
+          if (maxIdx === prev.length - 1) return prev; // already at top
+          // Move block up by 1
+          const arr = [...prev];
+          // Find the block
+          const block = indices.map(i => arr[i]);
+          // Remove block
+          indices.sort((a, b) => b - a).forEach(i => arr.splice(i, 1));
+          // Insert block after the next unselected
+          arr.splice(maxIdx + 1 - indices.length + 1, 0, ...block);
+          return arr;
+        });
+      }
+      // Send backward: Cmd/Ctrl + [
+      if ((e.metaKey || e.ctrlKey) && e.key === '[') {
+        e.preventDefault();
+        setImgs((prev) => {
+          const indices = prev.map((img, i) => selectedIds.includes(img.id) ? i : -1).filter(i => i !== -1);
+          if (indices.length === 0) return prev;
+          const minIdx = Math.min(...indices);
+          if (minIdx === 0) return prev; // already at bottom
+          // Move block down by 1
+          const arr = [...prev];
+          // Find the block
+          const block = indices.map(i => arr[i]);
+          // Remove block
+          indices.sort((a, b) => b - a).forEach(i => arr.splice(i, 1));
+          // Insert block before the previous unselected
+          arr.splice(minIdx - 1, 0, ...block);
+          return arr;
+        });
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedIds, imgs]);
+
+  // Shift+click for multi-select
+  const handleSelect = (id: string, e?: any) => {
+    if (e && (e.evt?.shiftKey || e.shiftKey)) {
+      setSelectedIds((prev) => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
+    } else {
+      setSelectedIds([id]);
+    }
+  };
+
+  // Deselect on empty space
+  const handleStageMouseDown = (e: any) => {
+    if (e.target === e.target.getStage()) setSelectedIds([]);
+  };
+
+  // Group drag
+  const handleGroupDragMove = (e: any) => {
+    const node = groupRef.current;
+    if (!node) return;
+    const { x: dx, y: dy } = node.position();
+    setImgs((prev) => prev.map(img =>
+      selectedIds.includes(img.id)
+        ? { ...img, x: img.x + dx, y: img.y + dy }
+        : img
+    ));
+    node.position({ x: 0, y: 0 });
+  };
 
   // Helper to add a single image
   const addImage = (src: string, width: number, height: number) => {
@@ -159,36 +295,51 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ initialImages = [], sho
     });
   };
 
-  // Handle file input change
+  // Handle file input change (multiple images)
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const src = ev.target?.result as string;
-      const img = new window.Image();
-      img.onload = () => {
-        addImage(src, img.width, img.height);
-      };
-      img.src = src;
-    };
-    reader.readAsDataURL(file);
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const validFiles = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    if (validFiles.length === 0) return;
+
+    // Find the rightmost x position of current images
+    let startX = imgs.length ? Math.max(...imgs.map((i) => i.x + i.width)) + GAP : 0;
+    const newImgsPromises = validFiles.map((file, idx) => {
+      return new Promise<CanvasImg>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const src = ev.target?.result as string;
+          const img = new window.Image();
+          img.onload = () => {
+            resolve({
+              id: `user-upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              src,
+              x: startX + idx * (img.width + GAP),
+              y: 0,
+              width: img.width || DEFAULT_W,
+              height: img.height || DEFAULT_H,
+              rotation: 0,
+            });
+          };
+          img.src = src;
+        };
+        reader.readAsDataURL(file);
+      });
+    });
+    Promise.all(newImgsPromises).then((newImgs) => {
+      setImgs((prev) => [...prev, ...newImgs]);
+    });
     // Reset input so same file can be uploaded again
     e.target.value = "";
   };
+
 
   // Open file dialog
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
 
-  const stageRef = useRef<Konva.Stage>(null);
 
-  const [imgs, setImgs] = useState<CanvasImg[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [scale, setScale] = useState(1);
-  const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
 
   /* ------------------------- Image Utilities --------------------------- */
   const addImagesRow = useCallback((images: CanvasImgInput[]) => {
@@ -233,8 +384,11 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ initialImages = [], sho
       y: (pointer.y - stagePos.y) / oldScale,
     };
 
-    const direction = e.evt.deltaY > 0 ? 1 : -1;
-    const newScale = direction > 0 ? oldScale * SCALE_BY : oldScale / SCALE_BY;
+    // Reverse: pinch in (deltaY > 0) should zoom OUT, pinch out (deltaY < 0) should zoom IN
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    let newScale = direction > 0 ? oldScale * SCALE_BY : oldScale / SCALE_BY;
+    // Clamp scale for usability
+    newScale = Math.max(0.1, Math.min(10, newScale));
 
     const newPos = {
       x: pointer.x - mousePointTo.x * newScale,
@@ -262,6 +416,7 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ initialImages = [], sho
         ref={fileInputRef}
         type="file"
         accept="image/*"
+        multiple
         style={{ display: 'none' }}
         onChange={handleFileChange}
         tabIndex={-1}
@@ -278,7 +433,7 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ initialImages = [], sho
       onWheel={handleWheel}
       onMouseDown={(e) => {
         // deselect on empty area
-        if (e.target === e.target.getStage()) setSelectedId(null);
+        if (e.target === e.target.getStage()) setSelectedIds([]);
       }}
     >
       <Layer listening={false /* grid & bg and default objects not interactive */}>
@@ -307,12 +462,39 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({ initialImages = [], sho
       </Layer>
 
       <Layer>
-        {imgs.map((img) => (
+        {/* Multi-select group */}
+        {selectedIds.length > 1 && (
+          <Group
+            ref={groupRef}
+            draggable
+            onDragEnd={handleGroupDragMove}
+          >
+            {imgs.filter(img => selectedIds.includes(img.id)).map((img) => (
+              <URLImage
+                key={img.id}
+                img={img}
+                selected={selectedIds.includes(img.id)}
+                onSelect={(id: string | null, e?: any) => id && handleSelect(id, e)}
+                onChange={updateImage}
+              />
+            ))}
+            <Transformer
+              nodes={imgs.filter(img => selectedIds.includes(img.id)).map((_, i, arr) => {
+                const node = stageRef.current?.findOne(`#${arr[i].id}`);
+                return node;
+              }).filter(Boolean)}
+              rotateEnabled
+              enabledAnchors={["top-left", "top-right", "bottom-left", "bottom-right"]}
+            />
+          </Group>
+        )}
+        {/* Individual selection or not selected */}
+        {imgs.filter(img => selectedIds.length <= 1 || !selectedIds.includes(img.id)).map((img) => (
           <URLImage
             key={img.id}
             img={img}
-            selected={img.id === selectedId}
-            onSelect={setSelectedId}
+            selected={selectedIds.includes(img.id)}
+            onSelect={(id: string | null, e?: any) => id && handleSelect(id, e)}
             onChange={updateImage}
           />
         ))}
