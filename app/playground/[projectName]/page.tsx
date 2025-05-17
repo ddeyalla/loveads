@@ -6,11 +6,9 @@ import Link from "next/link"
 import { useParams } from "next/navigation"
 import dynamic from 'next/dynamic';
 
-// Import types from infinite-canvas
-import type { CanvasImage, CanvasText, CanvasRectangle, CanvasCircle, AnyCanvasObject, InfiniteCanvasProps } from '@/components/infinite-canvas';
-
+import type { CanvasImgInput } from '@/components/infinite-canvas';
 // Use a more robust dynamic import approach
-const DynamicInfiniteCanvas = dynamic<InfiniteCanvasProps>(
+const DynamicInfiniteCanvas = dynamic(
   () => import('@/components/infinite-canvas').then((mod) => mod.default),
   { 
     ssr: false,
@@ -50,7 +48,7 @@ export default function PlaygroundPage() {
   const [isLoading, setIsLoading] = useState(false)
 
   // State for the canvas objects
-  const [canvasObjects, setCanvasObjects] = useState<AnyCanvasObject[]>([])
+  const [canvasObjects, setCanvasObjects] = useState<CanvasImgInput[]>([])
   const [zoomLevel, setZoomLevel] = useState(25)
   const [showProjectMenu, setShowProjectMenu] = useState(false)
   const [showZoomMenu, setShowZoomMenu] = useState(false)
@@ -186,65 +184,58 @@ export default function PlaygroundPage() {
   // Simulate image generation
   const simulateImageGeneration = () => {
     // Sample image data (in a real app, this would come from an API)
-    const sampleImages = [
-      {
-        id: `img-${Date.now()}-1`,
-        url: "/placeholder-se463.png",
-        width: 800,
-        height: 600,
-        aspectRatio: 800 / 600,
-        rotation: 0,
-      },
-      {
-        id: `img-${Date.now()}-2`,
-        url: "/placeholder-b51mz.png",
-        width: 600,
-        height: 800,
-        aspectRatio: 600 / 800,
-        rotation: 0,
-      },
-      {
-        id: `img-${Date.now()}-3`,
-        url: "/placeholder-4rljk.png",
-        width: 700,
-        height: 700,
-        aspectRatio: 1,
-        rotation: 0,
-      },
-      {
-        id: `img-${Date.now()}-4`,
-        url: "/placeholder-v443x.png",
-        width: 600,
-        height: 900,
-        aspectRatio: 600 / 900,
-        rotation: 0,
-      },
-      {
-        id: `img-${Date.now()}-5`,
-        url: "/placeholder-9zsxv.png",
-        width: 800,
-        height: 800,
-        aspectRatio: 1,
-        rotation: 0,
-      },
-    ]
+    const uniqueId = () => `img-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+const sampleImages = [
+  {
+    id: uniqueId(),
+    src: "/placeholder-se463.png",
+    width: 800,
+    height: 600,
+    rotation: 0,
+  },
+  {
+    id: uniqueId(),
+    src: "/placeholder-b51mz.png",
+    width: 600,
+    height: 800,
+    rotation: 0,
+  },
+  {
+    id: uniqueId(),
+    src: "/placeholder-4rljk.png",
+    width: 700,
+    height: 700,
+    rotation: 0,
+  },
+  {
+    id: uniqueId(),
+    src: "/placeholder-9zsxv.png",
+    width: 800,
+    height: 800,
+    rotation: 0,
+  },
+]
 
     // Position images next to each other with 40px spacing
     const positionedImages = sampleImages.map((img, index) => {
-      // Calculate x position based on previous images' widths and spacing
-      const previousWidth = sampleImages.slice(0, index).reduce((total, i) => total + i.width, 0)
-      const spacingWidth = index * 40 // 40px spacing between images
+  // Calculate x position based on previous images' widths and spacing
+  const previousWidth = sampleImages.slice(0, index).reduce((total, i) => total + i.width, 0)
+  const spacingWidth = index * 40 // 40px spacing between images
 
-      return {
-        ...img,
-        type: "image" as const,
-        x: previousWidth + spacingWidth,
-        y: 0, // All aligned at the top
-        zIndex: 0,
-      }
-    })
+  return {
+    id: img.id,
+    src: img.src,
+    width: img.width,
+    height: img.height,
+    rotation: img.rotation,
+    x: previousWidth + spacingWidth,
+    y: 0, // All aligned at the top
+  }
+})
 
-    setCanvasObjects(positionedImages)
+    // Pass images as initialImages to InfiniteCanvas
+setCanvasObjects(positionedImages)
+// Optionally, store in state if you want to show elsewhere
 
     // Add a message about the generated images
     const generationMessage: Message = {
@@ -463,7 +454,15 @@ export default function PlaygroundPage() {
 
         {/* Canvas area - 75% width */}
         <div className="flex-1 bg-white overflow-hidden">
-          <DynamicInfiniteCanvas canvasObjects={canvasObjects} setCanvasObjects={setCanvasObjects} />
+          <DynamicInfiniteCanvas initialImages={canvasObjects.map(img => ({
+  id: img.id,
+  src: img.src,
+  width: img.width,
+  height: img.height,
+  rotation: img.rotation,
+  x: img.x,
+  y: img.y,
+}))} />
         </div>
       </div>
     </div>
